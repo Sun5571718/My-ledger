@@ -535,7 +535,7 @@ COLUMN_CONFIG = {
 
 # ---------------------------------------------------------------- 侧边栏
 with st.sidebar:
-    st.header("⚙️ 设置与备份")
+    st.markdown("**⚙️ 设置与备份**")
 
     if USE_CLOUD:
         if st.session_state["cloud_error"]:
@@ -549,7 +549,7 @@ with st.sidebar:
                 help="打开后「待回款金额」图里的名字变成 张**，别人瞄到也看不清是谁")
 
     st.divider()
-    st.subheader("📥 导入 CSV")
+    st.markdown("**📥 导入 CSV**")
     up_file = st.file_uploader("选择 CSV 文件", type=["csv"], key="import_uploader")
     mode = st.radio("导入方式", ["追加到现有数据", "覆盖全部数据"], key="import_mode")
     if st.button("开始导入"):
@@ -568,7 +568,7 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    st.subheader("📤 导出 CSV")
+    st.markdown("**📤 导出 CSV**")
     st.download_button(
         "下载备份文件",
         data=to_csv_bytes(st.session_state["ledger"]),
@@ -578,13 +578,13 @@ with st.sidebar:
     st.caption("编码 UTF-8-BOM，Excel 不乱码。照片在云端，不在 CSV 里。")
 
     st.divider()
-    st.subheader("🧪 测试数据")
+    st.markdown("**🧪 测试数据**")
     if st.button("载入 6 条示例数据"):
         update_ledger(sample_data(), "✅ 已载入示例数据（替换了原有数据）")
         st.rerun()
 
     st.divider()
-    st.subheader("🗑️ 清空数据")
+    st.markdown("**🗑️ 清空数据**")
     confirm = st.checkbox("我确认清空全部数据（不可恢复）", key="confirm_clear")
     if st.button("清空全部数据"):
         if confirm:
@@ -595,7 +595,8 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------- 主区域
-st.title("💰 客户欠款台账")
+st.markdown("#### 💰 客户欠款台账")
+st.caption("版本 v10")        # ← 这一行是给你核对代码有没有传上去的，以后会删掉
 
 # 把「文件上传框」里 Streamlit 自带的英文提示换成中文
 st.markdown(
@@ -637,12 +638,9 @@ kw = keyword.strip()
 
 # ============ ③ 客户卡片 ============
 if ledger.empty:
-    st.info("还没有客户 👉 点下面的「➕ 添加客户」加第一个。"
-            "**加完上面会出现他的卡片，拍照和传照片就在卡片里**。"
-            "（也可以把左边栏往下滚，点「载入 6 条示例数据」先看看长什么样）")
+    st.caption("还没有客户，点下面的「➕ 添加客户」加第一个")
 elif kw:
     hit = (ledger["客户名称"].str.contains(kw, case=False, na=False)
-           | ledger["客户位置"].str.contains(kw, case=False, na=False)
            | ledger["备注"].str.contains(kw, case=False, na=False))
     matches = ledger[hit]
 
@@ -653,7 +651,6 @@ elif kw:
             picked = matches.index[0]
         else:
             labels = [f"{i + 1}. {r['客户名称']}"
-                      + (f"（{r['客户位置']}）" if r["客户位置"] else "")
                       for i, (_, r) in enumerate(matches.iterrows())]
             pick = st.selectbox(f"匹配到 {len(matches)} 位，点这里选：", labels, key="card_pick")
             picked = matches.index[labels.index(pick)]
@@ -662,18 +659,9 @@ elif kw:
         unpaid = to_float(row["欠款金额"]) - to_float(row["已收金额"])
         days = days_text(with_unpaid(pd.DataFrame([row])).iloc[0])
 
-        st.markdown(f"#### 👤 {row['客户名称']}　⏰ {days}")
+        st.markdown(f"**👤 {row['客户名称']}**　⏰ {days}")
         st.caption(f"欠款 ¥{to_float(row['欠款金额']):,.2f}　已收 ¥{to_float(row['已收金额']):,.2f}"
                    f"　未付 **¥{unpaid:,.2f}**")
-
-        place = st.text_input("📍 位置", value=str(row["客户位置"]),
-                              key=f"place_{picked}_{row['客户名称']}",
-                              placeholder="例如：城南建材市场 3 号门市")
-        if place.strip() != str(row["客户位置"]).strip():
-            new = ledger.copy()
-            new.loc[picked, "客户位置"] = place.strip()
-            update_ledger(new, "✅ 位置已保存")
-            st.rerun()
 
         # ---- 照片 ----
         photos = split_photos(row["照片"])
@@ -735,16 +723,15 @@ if st.button("➕ 添加客户", type="primary"):
 
 if st.session_state["show_add"]:
     with st.form("add_form", clear_on_submit=True):
-        name = st.text_input("客户名称 *", placeholder="必填")
-        debt = st.number_input("欠款金额(元)", min_value=0.0, step=100.0, format="%.2f")
-        paid = st.number_input("已收金额(元)", min_value=0.0, step=100.0, format="%.2f")
-        when = st.date_input("欠款日期", value=date.today())
-        last_paid = st.date_input("最后收款时间（可留空）", value=None)
-        note = st.text_input("备注", placeholder="选填")
-        place_new = st.text_input("位置", placeholder="例如：城南建材市场 3 号门市（选填）")
-        submitted = st.form_submit_button("✅ 添加到台账")
+        # ⭐ 按钮放在最上面：手机上不用往下滚才能点到
+        submitted = st.form_submit_button("✅ 添加到台账", type="primary")
 
-    st.caption("💡 添加后会自动跳到他的卡片，在那里拍照或从相册选照片。")
+        # ⭐ 只留 3 个必填项，其他都到卡片/表格里填，添加客户只要 10 秒
+        name = st.text_input("客户名称 *", placeholder="例如：张老板")
+        debt = st.number_input("欠款金额(元)", min_value=0.0, step=100.0,
+                               format="%.2f", value=None)
+        when = st.date_input("欠款日期", value=date.today())
+        st.caption("已收金额、最后收款时间、备注 → 存好后在明细表里双击就能改")
 
     if submitted:
         if not name.strip():
@@ -753,25 +740,24 @@ if st.session_state["show_add"]:
             new_row = pd.DataFrame([{
                 ID_COL: 0,
                 "客户名称": name.strip(),
-                "欠款金额": debt,
-                "已收金额": paid,
+                "欠款金额": 0.0 if debt is None else debt,
+                "已收金额": 0.0,
                 "欠款日期": pd.Timestamp(when),
-                "最后收款时间": pd.Timestamp(last_paid) if last_paid else pd.NaT,
-                "备注": note,
-                "客户位置": place_new,
+                "最后收款时间": pd.NaT,
+                "备注": "",
+                "客户位置": "",
                 "照片": "",
             }])
             st.session_state["pending_search"] = name.strip()
             update_ledger(pd.concat([ledger, new_row], ignore_index=True),
-                          f"✅ 已添加「{name.strip()}」 —— 👆 往上滚一点，他的卡片里有传照片的地方")
+                          f"✅ 已添加「{name.strip()}」")
             st.rerun()
 
 # ============ ⑤ 明细表 ============
-st.subheader("📋 明细（点数字可直接改）")
+st.markdown("**📋 明细**　（点数字可直接改）")
 
 if kw:
     filtered = data[data["客户名称"].str.contains(kw, case=False, na=False)
-                    | data["客户位置"].str.contains(kw, case=False, na=False)
                     | data["备注"].str.contains(kw, case=False, na=False)]
 else:
     filtered = data
@@ -815,7 +801,7 @@ elif signature(new_ledger) != signature(ledger):
     st.rerun()
 
 # ============ ⑥ 待回款金额 ============
-st.subheader("📈 待回款金额")
+st.markdown("**📈 待回款金额**")
 if data.empty or data["未付金额"].sum() <= 0:
     st.caption("暂无未付金额")
 else:
