@@ -1,32 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-💰 客户欠款台账 · 第二阶段（Supabase 云端版 · v8）
+💰 客户欠款台账 · 最终版（Supabase 云端 · v9）
 =========================================================
-和第一阶段比：**界面一模一样**，只把「数据层」从 CSV 换成了云端数据库。
+本版相对 v8 的两处升级（都是为了部署到公网）：
+  ① 🔒 访问密码：打开页面要先输密码，别人拿到网址也看不到客户信息
+     · 密码写在 .streamlit/secrets.toml 的 APP_PASSWORD 里（不写进代码）
+     · 支持用网址参数记住（?k=密码），方便存到手机主屏幕
+  ② 📷 照片改存云端 Storage（桶名 photos）
+     · 不然部署后照片存在服务器临时磁盘，一重启就没了
+     · USE_CLOUD = False 时仍然存本机 photos/ 文件夹
 
-    USE_CLOUD = True   → 数据存 Supabase 云端（手机/电脑看到的是同一份）
-    USE_CLOUD = False  → 退回本地 data/ledger.csv（断网也能用）
+开关：
+    USE_CLOUD = True   云端（默认）
+    USE_CLOUD = False  本地 CSV + 本机照片
 
-配置放在 .streamlit/secrets.toml 里：
-    SUPABASE_URL = "https://xxxx.supabase.co"
-    SUPABASE_ANON_KEY = "sb_publishable_..."
-
-★ 为什么每行都要一个 id？
-   云端每行都有「身份证号」id。有它才能「按行更新 / 按行删除」；
-   没有 id 就只能全删再全插，中途失败会丢数据。
-   id = 0 表示「这行还没存到云端」，保存时走 insert。
-
-⚠️ 照片目前仍存在本机 photos/ 文件夹。
-   等要部署到公网之前，我会把照片也接到云端存储（Supabase Storage），
-   否则部署后照片会丢 —— 这一步我会在部署前做，你别自己动。
-
-运行：streamlit run app.py
+运行：python -m streamlit run app.py
 """
 
 from __future__ import annotations
 
 import io
 import re
+import secrets
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -44,16 +39,16 @@ st.set_page_config(page_title="客户欠款台账", page_icon="💰", layout="wi
 # =====================================================================
 # 0. 全局设置
 # =====================================================================
-USE_CLOUD = True                 # ← 想退回本地 CSV 模式，改成 False
+USE_CLOUD = True
 
-TABLE = "ledger"                 # Supabase 里的表名
+TABLE = "ledger"                 # 数据表
+BUCKET = "photos"                # 存照片的桶
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_FILE = DATA_DIR / "ledger.csv"
 PHOTO_DIR = BASE_DIR / "photos"
 MAX_PHOTOS = 6
 
-# 数据库用英文列名（Postgres 里中文列名要加引号，容易出错），这里做映射
 DB_TO_CN = {
     "customer": "客户名称",
     "debt_amount": "欠款金额",
@@ -78,10 +73,9 @@ class CloudError(RuntimeError):
 
 
 # =====================================================================
-# 1. 数据层 A：Supabase 云端
+# 1. 数据层 A：Supabase（数据库 + 照片存储）
 # =====================================================================
 def get_secret(name: str, default: str = "") -> str:
-    """从 .streamlit/secrets.toml 读配置；没有这个文件也不会崩。"""
     try:
         value = st.secrets.get(name, default)
     except Exception:
@@ -100,7 +94,7 @@ def sb_client():
     key = get_secret("SUPABASE_ANON_KEY")
     if not url or not key:
         raise CloudError("没找到 SUPABASE_URL / SUPABASE_ANON_KEY，"
-                         "请检查 .streamlit/secrets.toml 的文件夹名、文件名、内容")
+                         "请检查 .streamlit/secrets.toml 的文件夹名、文件名和内容")
     try:
         from supabase import create_client  # noqa: F401
     except ImportError as exc:
@@ -116,7 +110,7 @@ def load_cloud() -> pd.DataFrame:
     try:
         res = client.table(TABLE).select("*").order("id").execute()
     except Exception as exc:
-        raise CloudError(f"读取云端数据失败：{exc}（表名、列名、密钥都检查一下）") from exc
+        raise CloudError(f"读取云端数据失败：{exc}") from exc
     rows = res.data or []
     if not rows:
         return empty_df()
@@ -141,13 +135,7 @@ def _to_db_record(row) -> dict:
 
 
 def save_cloud(df: pd.DataFrame) -> None:
-    """
-    写回云端，三步走：
-      ① 先记下云端现有的所有 id（等下用它算「哪些被删了」）
-      ② 新行(id=0) insert，老行(id>0) upsert
-      ③ 云端有、本地没有的 id → 删掉
-    顺序不能反：先插后记的话，刚插入的新行会被当成「多余的」删掉。
-    """
+    """① 先记云端 id → ② 新行 insert / 老行 upsert → ③ 删掉云端多出来的行。"""
     client = sb_client()
     df = normalize(df)
 
@@ -180,7 +168,7 @@ def save_cloud(df: pd.DataFrame) -> None:
 
 
 # =====================================================================
-# 2. 数据层 B：本地 CSV（备用，USE_CLOUD = False 时用）
+# 2. 数据层 B：本地 CSV（USE_CLOUD = False 时用）
 # =====================================================================
 def load_csv() -> pd.DataFrame:
     if not DATA_FILE.exists():
@@ -188,7 +176,7 @@ def load_csv() -> pd.DataFrame:
     for enc in ("utf-8-sig", "gbk", "utf-8"):
         try:
             df = normalize(pd.read_csv(DATA_FILE, encoding=enc))
-            df[ID_COL] = range(1, len(df) + 1)      # 本地模式：行号当身份证号
+            df[ID_COL] = range(1, len(df) + 1)
             return df
         except Exception:
             continue
@@ -240,7 +228,6 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_data() -> pd.DataFrame:
-    """界面只认这一个入口：它不关心数据是云端来的还是 CSV 来的。"""
     if USE_CLOUD:
         try:
             st.session_state["cloud_error"] = ""
@@ -252,7 +239,6 @@ def load_data() -> pd.DataFrame:
 
 
 def save_data(df: pd.DataFrame) -> bool:
-    """True = 存成功；False = 没存上（界面会把本地这份先留着）。"""
     if USE_CLOUD:
         try:
             st.session_state["cloud_error"] = ""
@@ -269,7 +255,7 @@ def read_csv_bytes(raw: bytes) -> pd.DataFrame | None:
     for enc in ("utf-8-sig", "gbk", "utf-8"):
         try:
             df = normalize(pd.read_csv(io.BytesIO(raw), encoding=enc))
-            df[ID_COL] = 0              # 导入的一律当新行，交给云端发新 id
+            df[ID_COL] = 0
             return df
         except Exception:
             continue
@@ -322,7 +308,7 @@ def mask_name(name: str) -> str:
 
 def merge_edits(ledger: pd.DataFrame, base: pd.DataFrame, edited: pd.DataFrame,
                 ids: list, apply_delete: bool = False):
-    """按 id 找行合并（不靠行号，安全）。先改后删。"""
+    """按 id 找行合并。先改后删。"""
     result = ledger.copy()
     pos_of = {int(v): i for i, v in enumerate(result[ID_COL])}
 
@@ -365,25 +351,72 @@ def signature(df: pd.DataFrame) -> list:
     return ["|".join(str(r[c]) for c in FIELDS) for _, r in out.iterrows()]
 
 
+# ---------------- 照片：云端 / 本地，两套后端同一个接口 ----------------
 def safe_name(text: str, limit: int = 16) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", str(text)).strip("_")
     return (cleaned or "客户")[:limit]
 
 
+def _mime_of(suffix: str) -> str:
+    s = suffix.lower()
+    if s in (".png",):
+        return "image/png"
+    if s in (".webp",):
+        return "image/webp"
+    return "image/jpeg"
+
+
 def save_photo(customer: str, data: bytes, suffix: str = ".jpg") -> str:
-    PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+    """存一张照片：云端模式传进 Storage，本地模式写进 photos/。返回文件名。"""
     suffix = suffix if suffix.startswith(".") else "." + suffix
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-    filename = f"{safe_name(customer)}_{stamp}{suffix.lower()}"
-    (PHOTO_DIR / filename).write_bytes(data)
+
+    if USE_CLOUD:
+        # ⚠️ 云端存储的文件名只能用英文/数字/下划线这类字符，
+        #    用中文名（张老板_xxx.png）会报 InvalidKey。
+        #    所以云端用随机文件名 —— 照片属于哪个客户，记在数据库的 photos 列里。
+        filename = f"p_{stamp}_{secrets.token_hex(3)}{suffix.lower()}"
+        client = sb_client()
+        try:
+            client.storage.from_(BUCKET).upload(
+                filename, data, {"content-type": _mime_of(suffix), "upsert": "true"})
+        except Exception as exc:
+            raise CloudError(f"照片上传失败：{exc}") from exc
+    else:
+        filename = f"{safe_name(customer)}_{stamp}{suffix.lower()}"
+        PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+        (PHOTO_DIR / filename).write_bytes(data)
+
     return filename
 
 
-def photo_file(filename: str) -> Path | None:
+def photo_src(filename: str):
+    """给 st.image 用的地址：云端给网址，本地给文件路径；都没有就 None。"""
     if not filename:
         return None
+    if USE_CLOUD:
+        try:
+            return sb_client().storage.from_(BUCKET).get_public_url(str(filename))
+        except Exception:
+            return None
     path = PHOTO_DIR / str(filename)
-    return path if path.exists() else None
+    return str(path) if path.exists() else None
+
+
+def delete_photo_file(filename: str) -> None:
+    """删掉照片文件本身（云端的从桶里删，本地的从文件夹删）。"""
+    if not filename:
+        return
+    if USE_CLOUD:
+        try:
+            sb_client().storage.from_(BUCKET).remove([str(filename)])
+        except Exception:
+            pass
+    else:
+        try:
+            (PHOTO_DIR / str(filename)).unlink()
+        except Exception:
+            pass
 
 
 def split_photos(value) -> list:
@@ -422,6 +455,36 @@ def sample_data() -> pd.DataFrame:
 
 
 # =====================================================================
+# 3.5 🔒 访问密码（部署到公网后，防止别人打开看到客户信息）
+# =====================================================================
+APP_PASSWORD = get_secret("APP_PASSWORD")
+
+if APP_PASSWORD:
+    try:
+        remembered = st.query_params.get("k", "")
+    except Exception:
+        remembered = ""
+    if "auth" not in st.session_state:
+        st.session_state["auth"] = (remembered == APP_PASSWORD)
+
+    if not st.session_state["auth"]:
+        st.title("🔒 客户欠款台账")
+        st.caption("请输入访问密码")
+        pw = st.text_input("密码", type="password", key="pw_input")
+        if st.button("进入", type="primary"):
+            if pw == APP_PASSWORD:
+                st.session_state["auth"] = True
+                try:
+                    st.query_params["k"] = pw          # 写进网址，方便存到手机主屏幕
+                except Exception:
+                    pass
+                st.rerun()
+            else:
+                st.error("密码不对，再试试")
+        st.stop()          # 没通过就不再往下执行，数据一个字都不会读
+
+
+# =====================================================================
 # 4. 界面层
 # =====================================================================
 if "ledger" not in st.session_state:
@@ -433,7 +496,7 @@ if "photo_key" not in st.session_state:
 if "pending_search" not in st.session_state:
     st.session_state["pending_search"] = ""
 if "show_add" not in st.session_state:
-    st.session_state["show_add"] = bool(st.session_state["ledger"].empty)
+    st.session_state["show_add"] = False        # 默认收起：不点「➕ 添加客户」就不展开
 if "mask_names" not in st.session_state:
     st.session_state["mask_names"] = False
 if "cloud_error" not in st.session_state:
@@ -447,12 +510,11 @@ def set_flash(msg: str) -> None:
 
 
 def update_ledger(df: pd.DataFrame, msg: str = "") -> None:
-    """统一写入口：保存 → 重新拉一遍（保证本地和云端一致）→ 重置表格。"""
     df = normalize(df)
     if save_data(df):
         st.session_state["ledger"] = load_data()
     else:
-        st.session_state["ledger"] = df          # 存不上就先留着，别让用户以为白改了
+        st.session_state["ledger"] = df
         set_flash("⚠️ 云端保存失败，改动暂时只在本地")
     st.session_state["editor_key"] += 1
     if msg:
@@ -479,7 +541,7 @@ with st.sidebar:
         if st.session_state["cloud_error"]:
             st.error("☁️ 云端有问题\n\n" + st.session_state["cloud_error"])
         else:
-            st.success("☁️ 已连接云端数据库（手机电脑同一份数据）")
+            st.success("☁️ 已连接云端（手机电脑同一份数据）")
     else:
         st.info("💾 本地模式：data/ledger.csv")
 
@@ -513,7 +575,7 @@ with st.sidebar:
         file_name=f"欠款台账_{date.today().strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
-    st.caption("编码 UTF-8-BOM，Excel 不乱码。")
+    st.caption("编码 UTF-8-BOM，Excel 不乱码。照片在云端，不在 CSV 里。")
 
     st.divider()
     st.subheader("🧪 测试数据")
@@ -535,6 +597,23 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.title("💰 客户欠款台账")
 
+# 把「文件上传框」里 Streamlit 自带的英文提示换成中文
+st.markdown(
+    """
+    <style>
+    [data-testid="stFileUploaderDropzoneInstructions"] span { display: none; }
+    [data-testid="stFileUploaderDropzoneInstructions"] small { display: none; }
+    [data-testid="stFileUploaderDropzoneInstructions"] > div::after {
+        content: "点这里选照片（手机可直接拍照 / 从相册选）";
+        font-size: 0.85rem;
+    }
+    [data-testid="stFileUploaderDropzone"] button span { display: none; }
+    [data-testid="stFileUploaderDropzone"] button::after { content: "选照片"; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 if st.session_state["flash"]:
     st.success(st.session_state["flash"])
     st.session_state["flash"] = ""
@@ -551,13 +630,16 @@ st.markdown(f"**总欠款 ¥{data['欠款金额'].sum():,.2f}**　（{len(data)}
 st.caption(f"已收 ¥{data['已收金额'].sum():,.2f}　·　未付 **¥{data['未付金额'].sum():,.2f}**")
 
 # ============ ② 搜索 ============
-keyword = st.text_input("🔍 搜索客户", placeholder="输入「李」就能列出所有姓李的（打完按键盘的搜索/前往）",
-                        key="search_box")
+c_search, c_go = st.columns([4, 1], vertical_alignment="bottom")
+keyword = c_search.text_input("🔍 搜索客户", placeholder="", key="search_box")
+c_go.button("确定", type="primary")
 kw = keyword.strip()
 
 # ============ ③ 客户卡片 ============
 if ledger.empty:
-    st.info("还没有客户 👉 点下面的「➕ 添加客户」加第一个，或在左侧点「载入 6 条示例数据」。")
+    st.info("还没有客户 👉 点下面的「➕ 添加客户」加第一个。"
+            "**加完上面会出现他的卡片，拍照和传照片就在卡片里**。"
+            "（也可以把左边栏往下滚，点「载入 6 条示例数据」先看看长什么样）")
 elif kw:
     hit = (ledger["客户名称"].str.contains(kw, case=False, na=False)
            | ledger["客户位置"].str.contains(kw, case=False, na=False)
@@ -593,19 +675,21 @@ elif kw:
             update_ledger(new, "✅ 位置已保存")
             st.rerun()
 
+        # ---- 照片 ----
         photos = split_photos(row["照片"])
         st.markdown(f"**📷 照片（{len(photos)} / {MAX_PHOTOS}）**")
         if photos:
             cols = st.columns(3)
             for i, filename in enumerate(photos):
                 with cols[i % 3]:
-                    path = photo_file(filename)
-                    if path is not None:
-                        st.image(str(path), width=130)
+                    src = photo_src(filename)
+                    if src:
+                        st.image(src, width=130)
                     else:
-                        st.caption("⚠️ 文件丢失")
+                        st.caption("⚠️ 照片不见了")
                     if st.button("🗑️ 删这张", key=f"del_{picked}_{i}"):
                         rest = [x for j, x in enumerate(photos) if j != i]
+                        delete_photo_file(filename)
                         new = ledger.copy()
                         new.loc[picked, "照片"] = join_photos(rest)
                         update_ledger(new, f"🗑️ 已删除 1 张，还剩 {len(rest)} 张")
@@ -617,32 +701,36 @@ elif kw:
             st.info(f"已经有 {MAX_PHOTOS} 张了，想换先点「🗑️ 删这张」。")
         else:
             room = MAX_PHOTOS - len(photos)
-            shot = st.camera_input("📷 拍照", key=f"cam_{picked}_{st.session_state['photo_key']}")
-            ups = st.file_uploader("🖼️ 从相册 / 电脑选（可一次选多张）",
+            st.markdown("**📷 选照片**：点下面的框 —— 手机可以直接拍照或从相册选，"
+                        "电脑就从文件夹选（一次可以选多张）")
+            ups = st.file_uploader("选择照片",
                                    type=["jpg", "jpeg", "png", "webp"],
                                    accept_multiple_files=True,
+                                   label_visibility="collapsed",
                                    key=f"up_{picked}_{st.session_state['photo_key']}")
             pending_photos = []
-            if shot is not None:
-                pending_photos.append((shot.getvalue(), ".jpg"))
             for item in (ups or []):
                 pending_photos.append((item.getvalue(), "." + item.name.rsplit(".", 1)[-1]))
             if len(pending_photos) > room:
                 st.warning(f"最多还能加 {room} 张，这次只存前 {room} 张。")
                 pending_photos = pending_photos[:room]
             if st.button(f"💾 保存照片（还能加 {room} 张）", disabled=not pending_photos):
-                saved = [save_photo(str(row["客户名称"]), blob, suffix)
-                         for blob, suffix in pending_photos]
-                new = ledger.copy()
-                new.loc[picked, "照片"] = join_photos(photos + saved)
-                st.session_state["photo_key"] += 1
-                update_ledger(new, f"✅ 已保存 {len(saved)} 张，现在共 {len(photos) + len(saved)} 张")
-                st.rerun()
+                try:
+                    saved = [save_photo(str(row["客户名称"]), blob, suffix)
+                             for blob, suffix in pending_photos]
+                except CloudError as exc:
+                    st.error(str(exc))
+                else:
+                    new = ledger.copy()
+                    new.loc[picked, "照片"] = join_photos(photos + saved)
+                    st.session_state["photo_key"] += 1
+                    update_ledger(new, f"✅ 已保存 {len(saved)} 张，现在共 {len(photos) + len(saved)} 张")
+                    st.rerun()
         st.divider()
 
+
 # ============ ④ 添加客户 ============
-if st.button("➕ 添加客户" if not st.session_state["show_add"] else "➖ 收起添加表单",
-             type="primary"):
+if st.button("➕ 添加客户", type="primary"):
     st.session_state["show_add"] = not st.session_state["show_add"]
 
 if st.session_state["show_add"]:
@@ -675,7 +763,7 @@ if st.session_state["show_add"]:
             }])
             st.session_state["pending_search"] = name.strip()
             update_ledger(pd.concat([ledger, new_row], ignore_index=True),
-                          f"✅ 已添加「{name.strip()}」")
+                          f"✅ 已添加「{name.strip()}」 —— 👆 往上滚一点，他的卡片里有传照片的地方")
             st.rerun()
 
 # ============ ⑤ 明细表 ============
@@ -691,7 +779,7 @@ else:
 st.caption(f"共 {len(data)} 位客户，当前显示 {len(filtered)} 位")
 
 base = filtered.reset_index(drop=True)
-ids = filtered[ID_COL].tolist()          # 每一行的身份证号
+ids = filtered[ID_COL].tolist()
 view = pd.DataFrame({
     "客户名称": base["客户名称"],
     "欠款金额": base["欠款金额"],
@@ -709,7 +797,7 @@ editor_args = dict(hide_index=True, num_rows="fixed",
                    column_config=COLUMN_CONFIG)
 try:
     edited = st.data_editor(view, width="stretch", **editor_args)
-except TypeError:          # 老版本 Streamlit 不认 width，就用旧写法
+except TypeError:
     edited = st.data_editor(view, use_container_width=True, **editor_args)
 
 st.caption("💡 金额双击就能改，**自动保存**；删客户：勾选「删除」再点下面按钮。")
@@ -723,7 +811,7 @@ if deleted:
     update_ledger(new_ledger, f"🗑️ 已删除 {deleted} 位客户")
     st.rerun()
 elif signature(new_ledger) != signature(ledger):
-    update_ledger(new_ledger)          # 写云端 → 重新拉取 → 刷新看板
+    update_ledger(new_ledger)
     st.rerun()
 
 # ============ ⑥ 待回款金额 ============
