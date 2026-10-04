@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     import altair as alt
@@ -299,6 +300,23 @@ def days_text(row) -> str:
     return f"{int(days)} 天"
 
 
+def days_badge(row) -> str:
+    """未回款天数配个颜色：绿=30天内，黄=31~60，橙=61~90，红=90天以上。"""
+    if to_float(row["未付金额"]) <= 0:
+        return "✅"                      # 已结清
+    d = unpaid_days(row["欠款日期"])
+    if pd.isna(d):
+        return "⚪"
+    d = int(d)
+    if d <= 30:
+        return "🟢"
+    if d <= 60:
+        return "🟡"
+    if d <= 90:
+        return "🟠"
+    return "🔴"
+
+
 def mask_name(name: str) -> str:
     text = str(name)
     if len(text) <= 1:
@@ -366,8 +384,33 @@ def _mime_of(suffix: str) -> str:
     return "image/jpeg"
 
 
+def shrink_image(data: bytes, suffix: str):
+    """
+    ⚡ 提速关键：手机拍的照片常有 3~5MB，上传要等很久。
+    先压缩到最长边 1600 像素、JPEG 质量 80，通常只剩 300KB 左右，快 10 倍。
+    压不了就原样返回，绝不因为压缩失败而存不上。
+    """
+    if len(data) < 400_000:          # 本来就小，不动它
+        return data, suffix
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > 1600:
+            scale = 1600 / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=80, optimize=True)
+        return out.getvalue(), ".jpg"
+    except Exception:
+        return data, suffix
+
+
 def save_photo(customer: str, data: bytes, suffix: str = ".jpg") -> str:
     """存一张照片：云端模式传进 Storage，本地模式写进 photos/。返回文件名。"""
+    data, suffix = shrink_image(data, suffix)
     suffix = suffix if suffix.startswith(".") else "." + suffix
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
@@ -499,6 +542,8 @@ if "show_add" not in st.session_state:
     st.session_state["show_add"] = False        # 默认收起：不点「➕ 添加客户」就不展开
 if "mask_names" not in st.session_state:
     st.session_state["mask_names"] = False
+if "clear_search" not in st.session_state:
+    st.session_state["clear_search"] = False
 if "cloud_error" not in st.session_state:
     st.session_state["cloud_error"] = ""
 if "flash" not in st.session_state:
@@ -510,9 +555,14 @@ def set_flash(msg: str) -> None:
 
 
 def update_ledger(df: pd.DataFrame, msg: str = "") -> None:
+    """
+    ⚡ 提速关键：只有「新增的行」才需要从云端重新拉一遍（为了拿云端发的 id）；
+    普通编辑（改金额、备注…）直接本地更新，省掉一次跨洋往返，点起来跟手很多。
+    """
     df = normalize(df)
+    need_reload = USE_CLOUD and bool((df[ID_COL] == 0).any())
     if save_data(df):
-        st.session_state["ledger"] = load_data()
+        st.session_state["ledger"] = load_data() if need_reload else df
     else:
         st.session_state["ledger"] = df
         set_flash("⚠️ 云端保存失败，改动暂时只在本地")
@@ -544,9 +594,6 @@ with st.sidebar:
             st.success("☁️ 已连接云端（手机电脑同一份数据）")
     else:
         st.info("💾 本地模式：data/ledger.csv")
-
-    st.checkbox("🙈 隐藏客户名（图表上打码）", key="mask_names",
-                help="打开后「待回款金额」图里的名字变成 张**，别人瞄到也看不清是谁")
 
     st.divider()
     st.markdown("**📥 导入 CSV**")
@@ -584,6 +631,9 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    st.caption("⚠️ 请把浏览器的「网页翻译」关掉 —— 页面本来就是中文，"
+               "翻译会把它拆坏并报 removeChild 错误")
+    st.divider()
     st.markdown("**🗑️ 清空数据**")
     confirm = st.checkbox("我确认清空全部数据（不可恢复）", key="confirm_clear")
     if st.button("清空全部数据"):
@@ -595,21 +645,54 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------- 主区域
+st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v10")        # ← 这一行是给你核对代码有没有传上去的，以后会删掉
+st.caption("版本 v30")
 
-# 把「文件上传框」里 Streamlit 自带的英文提示换成中文
+# ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
     """
     <style>
+    /* 藏掉输入框下面那行英文 "Press Enter to submit form"（我们用中文提示代替） */
+    [data-testid="InputInstructions"] { display: none !important; }
+
+    /* 照片上传框：手机上一行放不下，就改成上下两行排，文字才不会被挤成竖排 */
+    [data-testid="stFileUploaderDropzone"] {
+        flex-direction: column !important;
+        align-items: center !important;
+        gap: 0.5rem !important;
+    }
+    [data-testid="stFileUploaderDropzone"] > button { width: 100% !important; }
+
     [data-testid="stFileUploaderDropzoneInstructions"] span { display: none; }
     [data-testid="stFileUploaderDropzoneInstructions"] small { display: none; }
     [data-testid="stFileUploaderDropzoneInstructions"] > div::after {
-        content: "点这里选照片（手机可直接拍照 / 从相册选）";
+        content: "点这里选照片（手机可直接拍照）";
         font-size: 0.85rem;
+        white-space: nowrap;
     }
     [data-testid="stFileUploaderDropzone"] button span { display: none; }
-    [data-testid="stFileUploaderDropzone"] button::after { content: "选照片"; }
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "选照片";
+        white-space: nowrap;
+    }
+
+    [data-testid="stToolbar"] { display: none !important; }
+    [data-testid="stDecoration"] { display: none !important; }
+    [data-testid="stStatusWidget"] { display: none !important; }
+    [data-testid="stAppDeployButton"] { display: none !important; }
+    #MainMenu { display: none !important; }
+    footer { display: none !important; }
+    header[data-testid="stHeader"] { background: transparent !important; }
+
+    .block-container { padding-top: 0.8rem !important; padding-bottom: 1rem !important; }
+
+    /* 并排控件不许换行（不然手机上「确定」会掉到第二行），同时允许它们收窄，避免文字被截断 */
+    div[data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; align-items: flex-end; }
+    div[data-testid="stHorizontalBlock"] > div { min-width: 0 !important; }
+
+    /* 搜索框视觉上短一点（不影响「确定」那一列） */
+    .st-key-search_box input { max-width: 150px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -622,116 +705,168 @@ if st.session_state["flash"]:
 ledger = st.session_state["ledger"]
 data = with_unpaid(ledger)
 
-if st.session_state["pending_search"]:
-    st.session_state["search_box"] = st.session_state["pending_search"]
-    st.session_state["pending_search"] = ""
+if "page" not in st.session_state:
+    st.session_state["page"] = "list"
+if "current_id" not in st.session_state:
+    st.session_state["current_id"] = -1
+if "editing_id" not in st.session_state:
+    st.session_state["editing_id"] = -1
+if "del_pending" not in st.session_state:
+    st.session_state["del_pending"] = -1
 
-# ============ ① 总欠款 ============
+# =====================================================================
+# 详情页（点开客户卡片进来的，一屏搞定这个客户的所有事）
+# =====================================================================
+cur = st.session_state["current_id"]
+if st.session_state["page"] == "detail" and cur in ledger.index:
+    row = ledger.loc[cur]
+    cname = str(row["客户名称"])
+    days = days_text(with_unpaid(pd.DataFrame([row])).iloc[0])
+    unpaid = to_float(row["欠款金额"]) - to_float(row["已收金额"])
+
+    if st.button("← 返回客户列表"):
+        st.session_state["page"] = "list"
+        st.session_state["editing_id"] = -1
+        st.session_state["del_pending"] = -1
+        st.rerun()
+
+    st.markdown(f"### 👤 {cname}")
+    last_txt = ("没记录" if pd.isna(row["最后收款时间"])
+                else pd.Timestamp(row["最后收款时间"]).strftime("%Y-%m-%d"))
+    st.markdown(f"⏰ **{days}**未回款　｜　欠 ¥{to_float(row['欠款金额']):,.2f}"
+                f"　已收 ¥{to_float(row['已收金额']):,.2f}　未付 **¥{unpaid:,.2f}**")
+    st.caption(f"上次收款：{last_txt}")
+    st.divider()
+
+    # ---------- 照片 ----------
+    photos = split_photos(row["照片"])
+    st.markdown(f"**📷 照片（{len(photos)} / {MAX_PHOTOS}）**")
+
+    # ① 先放"选照片 / 保存"（最常用，放最上面一进来就点得到）
+    if len(photos) >= MAX_PHOTOS:
+        st.info(f"已经有 {MAX_PHOTOS} 张了，想换先删掉一张。")
+    else:
+        room = MAX_PHOTOS - len(photos)
+        ups = st.file_uploader("选择照片", type=["jpg", "jpeg", "png", "webp"],
+                               accept_multiple_files=True, label_visibility="collapsed",
+                               key=f"up_{cur}_{st.session_state['photo_key']}")
+        pending_photos = []
+        for item in (ups or []):
+            pending_photos.append((item.getvalue(), "." + item.name.rsplit(".", 1)[-1]))
+        if len(pending_photos) > room:
+            st.warning(f"最多还能加 {room} 张，只存前 {room} 张。")
+            pending_photos = pending_photos[:room]
+        if st.button(f"💾 保存照片（还能加 {room} 张）", disabled=not pending_photos, type="primary"):
+            try:
+                with st.spinner(f"上传中…（{len(pending_photos)} 张）"):
+                    saved = [save_photo(cname, blob, sfx) for blob, sfx in pending_photos]
+            except CloudError as exc:
+                st.error(str(exc))
+            else:
+                new = ledger.copy()
+                new.loc[cur, "照片"] = join_photos(photos + saved)
+                st.session_state["photo_key"] += 1
+                update_ledger(new, f"✅ 已保存 {len(saved)} 张")
+                st.session_state["page"] = "list"        # 存完自动回列表
+                st.rerun()
+
+    # ② 再看已有的照片（可以逐张删）
+    if photos:
+        st.caption("已有的照片（点下面的按钮可以删）")
+        cols = st.columns(3)
+        for i, filename in enumerate(photos):
+            with cols[i % 3]:
+                src_img = photo_src(filename)
+                if src_img:
+                    st.image(src_img, width=120)
+                else:
+                    st.caption("⚠️ 照片不见了")
+                if st.button("删除这张", key=f"dphoto_{cur}_{i}"):
+                    rest = [x for j, x in enumerate(photos) if j != i]
+                    delete_photo_file(filename)
+                    new = ledger.copy()
+                    new.loc[cur, "照片"] = join_photos(rest)
+                    update_ledger(new, f"🗑️ 已删除 1 张，还剩 {len(rest)} 张")
+                    st.rerun()
+    else:
+        st.caption("还没有照片，点上面的框选一张（手机可以直接拍照）")
+
+    st.divider()
+
+    # ---------- 改金额（一打开就能改，不用先点按钮） ----------
+    st.markdown("**✏️ 改金额**　（留空 = 不改）")
+    with st.form(f"edit_form_{cur}"):
+        debt = st.number_input(f"欠款金额(元)　当前 ¥{to_float(row['欠款金额']):,.2f}",
+                               min_value=0.0, step=100.0, format="%.2f", value=None)
+        paid = st.number_input(f"已收金额(元)　当前 ¥{to_float(row['已收金额']):,.2f}",
+                               min_value=0.0, step=100.0, format="%.2f", value=None)
+        # ⭐ 保存按钮紧跟金额框：手机上输完就能点到，不用往下翻
+        ok = st.form_submit_button("✅ 保存修改", type="primary")
+        st.caption("填了已收金额 → 收款时间自动记今天")
+        note = st.text_input("备注（可选）", value=str(row["备注"]))
+    if ok:
+        new = ledger.copy()
+        if debt is not None:
+            new.loc[cur, "欠款金额"] = debt
+        if paid is not None:
+            new.loc[cur, "已收金额"] = paid
+            new.loc[cur, "最后收款时间"] = pd.Timestamp(date.today())   # 自动记今天
+        if note.strip():
+            new.loc[cur, "备注"] = note.strip()
+        with st.spinner("保存中…"):
+            update_ledger(new, f"✅ 已保存「{cname}」")
+        st.rerun()
+
+    st.divider()
+
+    # ---------- 删除客户（点两次才真删） ----------
+    if st.session_state["del_pending"] == cur:
+        c1, c2 = st.columns(2)
+        if c1.button("⚠️ 确认删除", type="primary"):
+            update_ledger(ledger[ledger.index != cur], f"🗑️ 已删除「{cname}」")
+            st.session_state["page"] = "list"
+            st.session_state["del_pending"] = -1
+            st.rerun()
+        if c2.button("取消"):
+            st.session_state["del_pending"] = -1
+            st.rerun()
+    else:
+        if st.button("🗑️ 删除这个客户"):
+            st.session_state["del_pending"] = cur
+            st.rerun()
+
+    st.stop()          # 详情页到此为止，不再显示下面的主页内容
+
+# =====================================================================
+# 主页：总欠款 → 搜索 → 添加 → 客户列表（卡片 / 表格） → 图表
+# =====================================================================
 st.markdown(f"**总欠款 ¥{data['欠款金额'].sum():,.2f}**　（{len(data)} 笔）")
 st.caption(f"已收 ¥{data['已收金额'].sum():,.2f}　·　未付 **¥{data['未付金额'].sum():,.2f}**")
 
-# ============ ② 搜索 ============
-c_search, c_go = st.columns([4, 1], vertical_alignment="bottom")
+# 添加完客户 / 存完照片后，需要清空或改写搜索框（必须在控件创建之前做）
+if st.session_state["pending_search"]:
+    st.session_state["search_box"] = st.session_state["pending_search"]
+    st.session_state["pending_search"] = ""
+if st.session_state["clear_search"]:
+    st.session_state["search_box"] = ""
+    st.session_state["clear_search"] = False
+
+c_search, c_go, c_add = st.columns([3, 1.4, 1.8], vertical_alignment="bottom")
 keyword = c_search.text_input("🔍 搜索客户", placeholder="", key="search_box")
 c_go.button("确定", type="primary")
-kw = keyword.strip()
-
-# ============ ③ 客户卡片 ============
-if ledger.empty:
-    st.caption("还没有客户，点下面的「➕ 添加客户」加第一个")
-elif kw:
-    hit = (ledger["客户名称"].str.contains(kw, case=False, na=False)
-           | ledger["备注"].str.contains(kw, case=False, na=False))
-    matches = ledger[hit]
-
-    if matches.empty:
-        st.warning(f"没找到和「{kw}」有关的客户。")
-    else:
-        if len(matches) == 1:
-            picked = matches.index[0]
-        else:
-            labels = [f"{i + 1}. {r['客户名称']}"
-                      for i, (_, r) in enumerate(matches.iterrows())]
-            pick = st.selectbox(f"匹配到 {len(matches)} 位，点这里选：", labels, key="card_pick")
-            picked = matches.index[labels.index(pick)]
-
-        row = ledger.loc[picked]
-        unpaid = to_float(row["欠款金额"]) - to_float(row["已收金额"])
-        days = days_text(with_unpaid(pd.DataFrame([row])).iloc[0])
-
-        st.markdown(f"**👤 {row['客户名称']}**　⏰ {days}")
-        st.caption(f"欠款 ¥{to_float(row['欠款金额']):,.2f}　已收 ¥{to_float(row['已收金额']):,.2f}"
-                   f"　未付 **¥{unpaid:,.2f}**")
-
-        # ---- 照片 ----
-        photos = split_photos(row["照片"])
-        st.markdown(f"**📷 照片（{len(photos)} / {MAX_PHOTOS}）**")
-        if photos:
-            cols = st.columns(3)
-            for i, filename in enumerate(photos):
-                with cols[i % 3]:
-                    src = photo_src(filename)
-                    if src:
-                        st.image(src, width=130)
-                    else:
-                        st.caption("⚠️ 照片不见了")
-                    if st.button("🗑️ 删这张", key=f"del_{picked}_{i}"):
-                        rest = [x for j, x in enumerate(photos) if j != i]
-                        delete_photo_file(filename)
-                        new = ledger.copy()
-                        new.loc[picked, "照片"] = join_photos(rest)
-                        update_ledger(new, f"🗑️ 已删除 1 张，还剩 {len(rest)} 张")
-                        st.rerun()
-        else:
-            st.caption("还没有照片，下面拍一张或从相册选一张。")
-
-        if len(photos) >= MAX_PHOTOS:
-            st.info(f"已经有 {MAX_PHOTOS} 张了，想换先点「🗑️ 删这张」。")
-        else:
-            room = MAX_PHOTOS - len(photos)
-            st.markdown("**📷 选照片**：点下面的框 —— 手机可以直接拍照或从相册选，"
-                        "电脑就从文件夹选（一次可以选多张）")
-            ups = st.file_uploader("选择照片",
-                                   type=["jpg", "jpeg", "png", "webp"],
-                                   accept_multiple_files=True,
-                                   label_visibility="collapsed",
-                                   key=f"up_{picked}_{st.session_state['photo_key']}")
-            pending_photos = []
-            for item in (ups or []):
-                pending_photos.append((item.getvalue(), "." + item.name.rsplit(".", 1)[-1]))
-            if len(pending_photos) > room:
-                st.warning(f"最多还能加 {room} 张，这次只存前 {room} 张。")
-                pending_photos = pending_photos[:room]
-            if st.button(f"💾 保存照片（还能加 {room} 张）", disabled=not pending_photos):
-                try:
-                    saved = [save_photo(str(row["客户名称"]), blob, suffix)
-                             for blob, suffix in pending_photos]
-                except CloudError as exc:
-                    st.error(str(exc))
-                else:
-                    new = ledger.copy()
-                    new.loc[picked, "照片"] = join_photos(photos + saved)
-                    st.session_state["photo_key"] += 1
-                    update_ledger(new, f"✅ 已保存 {len(saved)} 张，现在共 {len(photos) + len(saved)} 张")
-                    st.rerun()
-        st.divider()
-
-
-# ============ ④ 添加客户 ============
-if st.button("➕ 添加客户", type="primary"):
+# 「添加客户」挪到「确定」后面，三个排一行
+if c_add.button("➕ 添加客户", type="primary"):
     st.session_state["show_add"] = not st.session_state["show_add"]
+kw = keyword.strip()
 
 if st.session_state["show_add"]:
     with st.form("add_form", clear_on_submit=True):
-        # ⭐ 按钮放在最上面：手机上不用往下滚才能点到
         submitted = st.form_submit_button("✅ 添加到台账", type="primary")
-
-        # ⭐ 只留 3 个必填项，其他都到卡片/表格里填，添加客户只要 10 秒
         name = st.text_input("客户名称 *", placeholder="例如：张老板")
         debt = st.number_input("欠款金额(元)", min_value=0.0, step=100.0,
                                format="%.2f", value=None)
         when = st.date_input("欠款日期", value=date.today())
-        st.caption("已收金额、最后收款时间、备注 → 存好后在明细表里双击就能改")
+        st.caption("已收金额、最后收款时间、备注 → 添加后点开这个客户，在详情页里改")
 
     if submitted:
         if not name.strip():
@@ -753,8 +888,9 @@ if st.session_state["show_add"]:
                           f"✅ 已添加「{name.strip()}」")
             st.rerun()
 
-# ============ ⑤ 明细表 ============
-st.markdown("**📋 明细**　（点数字可直接改）")
+# ---------- 明细：卡片式 / 表格 ----------
+mode = st.radio("显示方式", ["🗂️ 卡片式", "📋 表格"], horizontal=True,
+                key="view_mode", label_visibility="collapsed")
 
 if kw:
     filtered = data[data["客户名称"].str.contains(kw, case=False, na=False)
@@ -762,73 +898,178 @@ if kw:
 else:
     filtered = data
 
+# ---- 固定排序：欠得最多的排最上面（已结清的自动沉到最下面）----
+if not filtered.empty:
+    filtered = filtered.sort_values("未付金额", ascending=False)
+
 st.caption(f"共 {len(data)} 位客户，当前显示 {len(filtered)} 位")
 
-base = filtered.reset_index(drop=True)
-ids = filtered[ID_COL].tolist()
-view = pd.DataFrame({
-    "客户名称": base["客户名称"],
-    "欠款金额": base["欠款金额"],
-    "已收金额": base["已收金额"],
-    "未付金额": base["未付金额"],
-    "未回款天数": base.apply(days_text, axis=1),
-    "欠款日期": base["欠款日期"],
-    "最后收款时间": base["最后收款时间"],
-    "备注": base["备注"],
-    "删除": False,
-})
+# ---------------- 分页：一屏最多 10 位（客户多了也不卡） ----------------
+PAGE_SIZE = 10
+_total = len(filtered)
+_pages = max(1, (_total + PAGE_SIZE - 1) // PAGE_SIZE)
+if "list_kw" not in st.session_state:
+    st.session_state["list_kw"] = kw
+if "page_no" not in st.session_state:
+    st.session_state["page_no"] = 1
+if st.session_state["list_kw"] != kw:          # 换了搜索词就回到第 1 页
+    st.session_state["list_kw"] = kw
+    st.session_state["page_no"] = 1
+_page = min(max(1, st.session_state["page_no"]), _pages)
+st.session_state["page_no"] = _page
+page_rows = filtered.iloc[(_page - 1) * PAGE_SIZE: _page * PAGE_SIZE]
 
-editor_args = dict(hide_index=True, num_rows="fixed",
-                   key=f"editor_{st.session_state['editor_key']}",
-                   column_config=COLUMN_CONFIG)
-try:
-    edited = st.data_editor(view, width="stretch", **editor_args)
-except TypeError:
-    edited = st.data_editor(view, use_container_width=True, **editor_args)
+if _pages > 1:
+    _n1, _n2, _n3 = st.columns([1, 1.2, 1])
+    if _n1.button("◀ 上一页", disabled=_page <= 1):
+        st.session_state["page_no"] = _page - 1
+        st.rerun()
+    _n2.markdown(
+        f"<div style='text-align:center;font-size:0.85rem'>第 {_page} / {_pages} 页"
+        f"（{_total} 位）</div>", unsafe_allow_html=True)
+    if _n3.button("下一页 ▶", disabled=_page >= _pages):
+        st.session_state["page_no"] = _page + 1
+        st.rerun()
 
-st.caption("💡 金额双击就能改，**自动保存**；删客户：勾选「删除」再点下面按钮。")
+if mode == "🗂️ 卡片式":
+    if page_rows.empty:
+        st.caption("还没有客户" if data.empty else "没找到匹配的客户")
+    else:
+        for _k in ("pay_id", "debt_id"):
+            if _k not in st.session_state:
+                st.session_state[_k] = -1
 
-b1, b2, _ = st.columns([1, 1, 3])
-delete_clicked = b1.button("🗑️ 删除勾选客户", type="primary")
+        for rid, row in page_rows.iterrows():
+            cname = str(row["客户名称"])
+            unpaid = to_float(row["欠款金额"]) - to_float(row["已收金额"])
+            days = days_text(with_unpaid(pd.DataFrame([row])).iloc[0])
+            badge = days_badge(with_unpaid(pd.DataFrame([row])).iloc[0])
+            n_photos = len(split_photos(row["照片"]))
 
-new_ledger, deleted = merge_edits(ledger, base, edited, ids, apply_delete=delete_clicked)
+            with st.container(border=True):
+                st.markdown(f"{badge} **{cname}**　⏰ {days}")
+                st.markdown(f"未付 **¥{unpaid:,.2f}**"
+                            + (f"　｜　📷 {n_photos} 张" if n_photos else ""))
+                b1, b2, b3 = st.columns(3)
+                if b1.button("💰 收钱", key=f"pay_{rid}_{cname}"):
+                    st.session_state["pay_id"] = (-1 if st.session_state["pay_id"] == rid else rid)
+                    st.session_state["debt_id"] = -1
+                    st.rerun()
+                if b2.button("➕ 欠款", key=f"debt_{rid}_{cname}"):
+                    st.session_state["debt_id"] = (-1 if st.session_state["debt_id"] == rid else rid)
+                    st.session_state["pay_id"] = -1
+                    st.rerun()
+                if b3.button("📷 拍照", key=f"photo_{rid}_{cname}"):
+                    st.session_state["page"] = "detail"
+                    st.session_state["current_id"] = rid
+                    st.session_state["editing_id"] = -1
+                    st.session_state["del_pending"] = -1
+                    st.session_state["pay_id"] = -1
+                    st.session_state["debt_id"] = -1
+                    st.rerun()
 
-if deleted:
-    update_ledger(new_ledger, f"🗑️ 已删除 {deleted} 位客户")
-    st.rerun()
-elif signature(new_ledger) != signature(ledger):
-    update_ledger(new_ledger)
-    st.rerun()
+                # ---- 就地收钱（累加到已收金额，收款时间记今天）----
+                if st.session_state["pay_id"] == rid:
+                    with st.form(f"pay_form_{rid}_{cname}"):
+                        amt = st.number_input("这次收了多少？", min_value=0.0, step=100.0,
+                                              format="%.2f", value=None, key="pay_amt")
+                        st.caption("💡 输完直接按键盘的「开始」/「完成」键就能确定，不用收键盘")
+                        cc1, cc2 = st.columns(2)
+                        go = cc1.form_submit_button("✅ 确定", type="primary")
+                        no = cc2.form_submit_button("取消")
+                    if go:
+                        if amt is None or amt <= 0:
+                            st.warning("请填写金额")
+                        else:
+                            new = ledger.copy()
+                            new.loc[rid, "已收金额"] = to_float(row["已收金额"]) + amt
+                            new.loc[rid, "最后收款时间"] = pd.Timestamp(date.today())
+                            st.session_state["pay_id"] = -1
+                            update_ledger(new, f"✅ 「{cname}」已收 ¥{amt:,.2f}")
+                            st.rerun()
+                    if no:
+                        st.session_state["pay_id"] = -1
+                        st.rerun()
 
-# ============ ⑥ 待回款金额 ============
-st.markdown("**📈 待回款金额**")
-if data.empty or data["未付金额"].sum() <= 0:
-    st.caption("暂无未付金额")
+
+                # ---- 就地加欠款（累加到欠款金额）----
+                if st.session_state["debt_id"] == rid:
+                    with st.form(f"debt_form_{rid}_{cname}"):
+                        amt2 = st.number_input("这次又欠了多少？", min_value=0.0, step=100.0,
+                                               format="%.2f", value=None, key="debt_amt")
+                        st.caption("💡 输完直接按键盘的「开始」/「完成」键就能确定，不用收键盘")
+                        dd1, dd2 = st.columns(2)
+                        go2 = dd1.form_submit_button("✅ 确定", type="primary")
+                        no2 = dd2.form_submit_button("取消")
+                    if go2:
+                        if amt2 is None or amt2 <= 0:
+                            st.warning("请填写金额")
+                        else:
+                            new = ledger.copy()
+                            new.loc[rid, "欠款金额"] = to_float(row["欠款金额"]) + amt2
+                            st.session_state["debt_id"] = -1
+                            update_ledger(new, f"✅ 「{cname}」又欠 ¥{amt2:,.2f}")
+                            st.rerun()
+                    if no2:
+                        st.session_state["debt_id"] = -1
+                        st.rerun()
+
+                # 两个表单哪个开着，就自动把光标放进它的输入框（键盘立刻弹出，少点一下）
+                if st.session_state["pay_id"] == rid or st.session_state["debt_id"] == rid:
+                    components.html(
+                        """<script>
+                        (function(){
+                          var d = window.parent.document;
+                          var el = d.querySelector('.st-key-pay_amt input')
+                                || d.querySelector('.st-key-debt_amt input');
+                          if (el) { el.focus(); }
+                        })();
+                        </script>""",
+                        height=0,
+                    )
 else:
-    top = data[data["未付金额"] > 0].nlargest(6, "未付金额")[["客户名称", "未付金额"]].copy()
-    top = top.sort_values("未付金额", ascending=False)
-    chart_df = top.copy()
-    if st.session_state["mask_names"]:
-        chart_df["客户名称"] = chart_df["客户名称"].apply(mask_name)
-    if alt is None:
-        st.bar_chart(top.set_index("客户名称")["未付金额"])
-    else:
-        bar = (
-            alt.Chart(chart_df)
-            .mark_bar(color="#E4572E")
-            .encode(
-                x=alt.X("未付金额:Q", title="未付金额（元）"),
-                y=alt.Y("客户名称:N", sort="-x", title=None),
-                tooltip=[alt.Tooltip("客户名称:N"), alt.Tooltip("未付金额:Q", format=",.2f")],
-            )
-            .properties(width="container", height=max(140, 32 * len(chart_df)))
-        )
-        st.altair_chart(bar)
+    base = page_rows.reset_index(drop=True)
+    ids = page_rows[ID_COL].tolist()
+    view = pd.DataFrame({
+        "客户名称": base["客户名称"],
+        "欠款金额": base["欠款金额"],
+        "已收金额": base["已收金额"],
+        "未付金额": base["未付金额"],
+        "未回款天数": base.apply(days_text, axis=1),
+        "欠款日期": base["欠款日期"],
+        "最后收款时间": base["最后收款时间"],
+        "备注": base["备注"],
+        "删除": False,
+    })
 
-    pending = data[data["未付金额"] > 0].copy()
-    pending["天数"] = pending["欠款日期"].apply(unpaid_days)
-    old = pending[pending["天数"] > 90]
-    if not old.empty:
-        st.caption(f"⏰ 超过 90 天没回款：**{len(old)} 位**，共 ¥{old['未付金额'].sum():,.2f}")
-    else:
-        st.caption("⏰ 没有超过 90 天还没回款的客户")
+    editor_args = dict(hide_index=True, num_rows="fixed",
+                       key=f"editor_{st.session_state['editor_key']}",
+                       column_config=COLUMN_CONFIG)
+    try:
+        edited = st.data_editor(view, width="stretch", **editor_args)
+    except TypeError:
+        edited = st.data_editor(view, use_container_width=True, **editor_args)
+
+    st.caption("💡 金额双击就能改，**自动保存**；删客户：勾选「删除」再点下面按钮。")
+
+    b1, b2, _ = st.columns([1, 1, 3])
+    delete_clicked = b1.button("🗑️ 删除勾选客户", type="primary")
+
+    new_ledger, deleted = merge_edits(ledger, base, edited, ids, apply_delete=delete_clicked)
+
+    if deleted:
+        update_ledger(new_ledger, f"🗑️ 已删除 {deleted} 位客户")
+        st.rerun()
+    elif signature(new_ledger) != signature(ledger):
+        update_ledger(new_ledger)
+        st.rerun()
+
+# ---------- 一行提醒（原来那张大图去掉了：列表能按"欠得最多"排序，一眼就看到） ----------
+if not data.empty and data["未付金额"].sum() > 0:
+    _pending = data[data["未付金额"] > 0].copy()
+    _pending["天数"] = _pending["欠款日期"].apply(unpaid_days)
+    _old = _pending[_pending["天数"] > 90]
+    if not _old.empty:
+        st.caption(f"⏰ 超过 90 天没回款：**{len(_old)} 位**，共 ¥{_old['未付金额'].sum():,.2f}")
+
+st.markdown('<a href="#top" style="font-size:0.85rem">⬆️ 回到顶部</a>', unsafe_allow_html=True)
