@@ -647,7 +647,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v30")
+st.caption("版本 v39")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -667,13 +667,13 @@ st.markdown(
     [data-testid="stFileUploaderDropzoneInstructions"] span { display: none; }
     [data-testid="stFileUploaderDropzoneInstructions"] small { display: none; }
     [data-testid="stFileUploaderDropzoneInstructions"] > div::after {
-        content: "点这里选照片（手机可直接拍照）";
+        content: "点这里选择文件";
         font-size: 0.85rem;
         white-space: nowrap;
     }
     [data-testid="stFileUploaderDropzone"] button span { display: none; }
     [data-testid="stFileUploaderDropzone"] button::after {
-        content: "选照片";
+        content: "选择文件";
         white-space: nowrap;
     }
 
@@ -838,10 +838,87 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
     st.stop()          # 详情页到此为止，不再显示下面的主页内容
 
 # =====================================================================
+# 逐月收款页（点主页的「📈 每月」进来）
+# =====================================================================
+if st.session_state["page"] == "stats":
+    _y = date.today().year
+    if st.button("← 返回客户列表"):
+        st.session_state["page"] = "list"
+        st.rerun()
+    st.markdown(f"### 📈 {_y} 年收款统计")
+
+    _ys = (pd.to_datetime(data["最后收款时间"], errors="coerce").dt.year
+           if not data.empty else None)
+    _paid = data.loc[_ys == _y] if (not data.empty and _ys is not None) else data.iloc[0:0]
+    _grp2 = (data.iloc[0:0].assign(月=[], 金额=[]).groupby("月")["金额"].sum()
+             if _paid.empty
+             else _paid.assign(月=pd.to_datetime(_paid["最后收款时间"]).dt.month)
+                      .groupby("月")["已收金额"].sum())
+
+    _labels = [f"{m}月" for m in range(1, 13)]
+    _vals = [float(_grp2.get(m, 0.0)) for m in range(1, 13)]
+    _chart_df = pd.DataFrame({"月份": _labels, "收款": _vals})
+
+    if alt is None:
+        st.bar_chart(_chart_df.set_index("月份"))
+    else:
+        _ch = (
+            alt.Chart(_chart_df)
+            .mark_bar(color="#2E8B57")
+            .encode(
+                x=alt.X("月份:N", sort=_labels, title=None,
+                        axis=alt.Axis(labelAngle=-45, labelFontSize=11)),
+                y=alt.Y("收款:Q", title="收款（元）"),
+                tooltip=[alt.Tooltip("月份:N"), alt.Tooltip("收款:Q", format=",.2f")],
+            )
+            .properties(width="container", height=300)
+        )
+        st.altair_chart(_ch)
+
+    st.markdown(f"**全年合计 ¥{sum(_vals):,.2f}**　｜　"
+                f"本月（{date.today().month}月）¥{_vals[date.today().month - 1]:,.2f}")
+    st.caption("柱子的高矮就是那个月收了多少 ✓ 每个月都会显示（没收钱的月份是 0 ✓）")
+    st.markdown('<a href="#top" style="font-size:0.85rem">⬆️ 回到顶部</a>',
+                unsafe_allow_html=True)
+    st.stop()
+
+# =====================================================================
 # 主页：总欠款 → 搜索 → 添加 → 客户列表（卡片 / 表格） → 图表
 # =====================================================================
-st.markdown(f"**总欠款 ¥{data['欠款金额'].sum():,.2f}**　（{len(data)} 笔）")
-st.caption(f"已收 ¥{data['已收金额'].sum():,.2f}　·　未付 **¥{data['未付金额'].sum():,.2f}**")
+_head1 = (f"📅 **{date.today().year}年**　欠款 "
+          f"**¥{data['欠款金额'].sum():,.0f}**（{len(data)} 笔）")
+
+# ---------- 客户统计（纯本地计算，不额外联网，不占流量） ----------
+_this_year = date.today().year
+_years = pd.to_datetime(data["最后收款时间"], errors="coerce").dt.year if not data.empty else None
+_money_in = 0.0 if data.empty else float(
+    data.loc[_years == _this_year, "已收金额"].sum())        # 今年收到手的钱
+_owed = float(data["未付金额"].sum()) if not data.empty else 0.0     # 还没收回来的
+_total = float(data["欠款金额"].sum()) if not data.empty else 0.0     # 合计（历史累计借出）
+
+
+# ---------- 收款明细：本月 / 全年 / 逐月（同样纯本地算，不额外联网） ----------
+_this_month = date.today().month
+_paid_year = data.loc[_years == _this_year] if (not data.empty and _years is not None) else data.iloc[0:0]
+_month_in = 0.0
+_by_month_txt = "暂无记录"
+if not _paid_year.empty:
+    _m = pd.to_datetime(_paid_year["最后收款时间"]).dt.month
+    _grp = _paid_year.groupby(_m)["已收金额"].sum().sort_index()
+    _month_in = float(_grp.get(_this_month, 0.0))
+    _parts = [f"{int(k)}月 ¥{v:,.2f}" for k, v in _grp.items() if v > 0]
+    _by_month_txt = "　｜　".join(_parts) if _parts else "暂无记录"
+
+# 第一行：年份 + 欠款；第二行：月收 + 年收（分开两行，手机上不挤）
+st.markdown(_head1)
+_s1, _s2 = st.columns([2.2, 1], vertical_alignment="bottom")
+_s1.markdown(f"月收 **¥{_month_in:,.0f}**　年收 **¥{_money_in:,.0f}**")
+if _s2.button("📈 统计", key="go_stats"):
+    st.session_state["page"] = "stats"
+    st.rerun()
+# 只有真的有收款记录时，才多显示一行"各月收款"（平时不占地方）
+if _by_month_txt != "暂无记录":
+    st.caption(f"📊 各月收款：{_by_month_txt}")
 
 # 添加完客户 / 存完照片后，需要清空或改写搜索框（必须在控件创建之前做）
 if st.session_state["pending_search"]:
@@ -852,10 +929,11 @@ if st.session_state["clear_search"]:
     st.session_state["clear_search"] = False
 
 c_search, c_go, c_add = st.columns([3, 1.4, 1.8], vertical_alignment="bottom")
-keyword = c_search.text_input("🔍 搜索客户", placeholder="", key="search_box")
+keyword = c_search.text_input("搜索", placeholder="", key="search_box",
+                               label_visibility="collapsed")
 c_go.button("确定", type="primary")
 # 「添加客户」挪到「确定」后面，三个排一行
-if c_add.button("➕ 添加客户", type="primary"):
+if c_add.button("➕ 添加", type="primary"):
     st.session_state["show_add"] = not st.session_state["show_add"]
 kw = keyword.strip()
 
@@ -902,8 +980,6 @@ else:
 if not filtered.empty:
     filtered = filtered.sort_values("未付金额", ascending=False)
 
-st.caption(f"共 {len(data)} 位客户，当前显示 {len(filtered)} 位")
-
 # ---------------- 分页：一屏最多 10 位（客户多了也不卡） ----------------
 PAGE_SIZE = 10
 _total = len(filtered)
@@ -920,16 +996,9 @@ st.session_state["page_no"] = _page
 page_rows = filtered.iloc[(_page - 1) * PAGE_SIZE: _page * PAGE_SIZE]
 
 if _pages > 1:
-    _n1, _n2, _n3 = st.columns([1, 1.2, 1])
-    if _n1.button("◀ 上一页", disabled=_page <= 1):
-        st.session_state["page_no"] = _page - 1
-        st.rerun()
-    _n2.markdown(
-        f"<div style='text-align:center;font-size:0.85rem'>第 {_page} / {_pages} 页"
-        f"（{_total} 位）</div>", unsafe_allow_html=True)
-    if _n3.button("下一页 ▶", disabled=_page >= _pages):
-        st.session_state["page_no"] = _page + 1
-        st.rerun()
+    st.caption(f"共 {len(data)} 位客户　·　第 {_page}/{_pages} 页")
+else:
+    st.caption(f"共 {len(data)} 位客户")
 
 if mode == "🗂️ 卡片式":
     if page_rows.empty:
@@ -1062,6 +1131,16 @@ else:
         st.rerun()
     elif signature(new_ledger) != signature(ledger):
         update_ledger(new_ledger)
+        st.rerun()
+
+# ---------- 翻页按钮放在列表下面（看完这一页顺手翻） ----------
+if _pages > 1:
+    _p1, _p2 = st.columns(2)
+    if _p1.button("◀ 上一页", disabled=_page <= 1):
+        st.session_state["page_no"] = _page - 1
+        st.rerun()
+    if _p2.button("下一页 ▶", disabled=_page >= _pages):
+        st.session_state["page_no"] = _page + 1
         st.rerun()
 
 # ---------- 一行提醒（原来那张大图去掉了：列表能按"欠得最多"排序，一眼就看到） ----------
