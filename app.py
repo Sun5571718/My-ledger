@@ -300,6 +300,14 @@ def days_text(row) -> str:
     return f"{int(days)} 天"
 
 
+def money_short(v) -> str:
+    """手机上一眼能看懂的金额：1 万及以上用「万」（保留 1 位小数），1 万以下显示元。"""
+    v = to_float(v)
+    if abs(v) >= 10000:
+        return f"¥{v / 10000:,.2f}万"      # 1 万以上：用"万"，保留两位小数
+    return f"¥{v:,.2f}"                     # 1 万以下：原样，保留两位小数
+
+
 def days_badge(row) -> str:
     """未回款天数配个颜色：绿=30天内，黄=31~60，橙=61~90，红=90天以上。"""
     if to_float(row["未付金额"]) <= 0:
@@ -554,13 +562,14 @@ def set_flash(msg: str) -> None:
     st.session_state["flash"] = msg
 
 
-def update_ledger(df: pd.DataFrame, msg: str = "") -> None:
+def update_ledger(df: pd.DataFrame, msg: str = "", force_reload: bool = False) -> None:
     """
     ⚡ 提速关键：只有「新增的行」才需要从云端重新拉一遍（为了拿云端发的 id）；
     普通编辑（改金额、备注…）直接本地更新，省掉一次跨洋往返，点起来跟手很多。
+    收钱/欠款这类要立刻看到新数字的，传 force_reload=True，保证和云端一致。
     """
     df = normalize(df)
-    need_reload = USE_CLOUD and bool((df[ID_COL] == 0).any())
+    need_reload = force_reload or (USE_CLOUD and bool((df[ID_COL] == 0).any()))
     if save_data(df):
         st.session_state["ledger"] = load_data() if need_reload else df
     else:
@@ -647,12 +656,22 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v39")
+st.caption("版本 v51")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
     """
     <style>
+    /* "📈 统计"小按钮：小一号，紧跟在"年收"后面，不抢戏 */
+    .st-key-go_stats { margin-top: 0.1rem !important; }
+    .st-key-go_stats button {
+        font-size: 0.68rem !important;
+        padding: 0.05rem 0.4rem !important;
+        min-height: 1.6rem !important;
+        line-height: 1.2 !important;
+        border-radius: 0.5rem !important;
+    }
+
     /* 藏掉输入框下面那行英文 "Press Enter to submit form"（我们用中文提示代替） */
     [data-testid="InputInstructions"] { display: none !important; }
 
@@ -794,8 +813,9 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
     st.divider()
 
     # ---------- 改金额（一打开就能改，不用先点按钮） ----------
-    st.markdown("**✏️ 改金额**　（留空 = 不改）")
+    st.markdown("**✏️ 编辑客户**　（数字框留空 = 不改）")
     with st.form(f"edit_form_{cur}"):
+        new_name = st.text_input("客户名称", value=cname)
         debt = st.number_input(f"欠款金额(元)　当前 ¥{to_float(row['欠款金额']):,.2f}",
                                min_value=0.0, step=100.0, format="%.2f", value=None)
         paid = st.number_input(f"已收金额(元)　当前 ¥{to_float(row['已收金额']):,.2f}",
@@ -803,18 +823,25 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
         # ⭐ 保存按钮紧跟金额框：手机上输完就能点到，不用往下翻
         ok = st.form_submit_button("✅ 保存修改", type="primary")
         st.caption("填了已收金额 → 收款时间自动记今天")
+        _start_val = (date.today() if pd.isna(row["欠款日期"])
+                      else pd.Timestamp(row["欠款日期"]).date())
+        start = st.date_input("欠款日期", value=_start_val)
         note = st.text_input("备注（可选）", value=str(row["备注"]))
     if ok:
         new = ledger.copy()
+        if new_name.strip() and new_name.strip() != cname:
+            new.loc[cur, "客户名称"] = new_name.strip()          # 改名字
         if debt is not None:
             new.loc[cur, "欠款金额"] = debt
         if paid is not None:
             new.loc[cur, "已收金额"] = paid
             new.loc[cur, "最后收款时间"] = pd.Timestamp(date.today())   # 自动记今天
+        if start is not None and pd.Timestamp(start) != pd.Timestamp(row["欠款日期"]):
+            new.loc[cur, "欠款日期"] = pd.Timestamp(start)        # 改欠款日期
         if note.strip():
             new.loc[cur, "备注"] = note.strip()
         with st.spinner("保存中…"):
-            update_ledger(new, f"✅ 已保存「{cname}」")
+            update_ledger(new, f"✅ 已保存「{new_name.strip() or cname}」")
         st.rerun()
 
     st.divider()
@@ -823,7 +850,8 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
     if st.session_state["del_pending"] == cur:
         c1, c2 = st.columns(2)
         if c1.button("⚠️ 确认删除", type="primary"):
-            update_ledger(ledger[ledger.index != cur], f"🗑️ 已删除「{cname}」")
+            update_ledger(ledger[ledger.index != cur], f"🗑️ 已删除「{cname}」",
+                          force_reload=True)
             st.session_state["page"] = "list"
             st.session_state["del_pending"] = -1
             st.rerun()
@@ -859,25 +887,32 @@ if st.session_state["page"] == "stats":
     _vals = [float(_grp2.get(m, 0.0)) for m in range(1, 13)]
     _chart_df = pd.DataFrame({"月份": _labels, "收款": _vals})
 
-    if alt is None:
+    if sum(_vals) <= 0:
+        # 今年一分钱都还没收到 —— 别显示一张空的怪图，直接说人话
+        st.info("📭 今年还没有收款记录。\n\n"
+                "等你在客户卡片上点「💰 收钱」记下第一笔，"
+                "这里就会出现 12 个月的柱状图 ✓")
+    elif alt is None:
         st.bar_chart(_chart_df.set_index("月份"))
     else:
         _ch = (
             alt.Chart(_chart_df)
             .mark_bar(color="#2E8B57")
             .encode(
-                x=alt.X("月份:N", sort=_labels, title=None,
-                        axis=alt.Axis(labelAngle=-45, labelFontSize=11)),
-                y=alt.Y("收款:Q", title="收款（元）"),
+                # 月份竖着排：手机上 12 个月的标签全都能显示出来
+                y=alt.Y("月份:N", sort=_labels, title=None,
+                        axis=alt.Axis(labelFontSize=12)),
+                x=alt.X("收款:Q", title="收款（元）",
+                        axis=alt.Axis(format="~s", labelFontSize=11)),
                 tooltip=[alt.Tooltip("月份:N"), alt.Tooltip("收款:Q", format=",.2f")],
             )
-            .properties(width="container", height=300)
+            .properties(width="container", height=330)
         )
         st.altair_chart(_ch)
 
     st.markdown(f"**全年合计 ¥{sum(_vals):,.2f}**　｜　"
                 f"本月（{date.today().month}月）¥{_vals[date.today().month - 1]:,.2f}")
-    st.caption("柱子的高矮就是那个月收了多少 ✓ 每个月都会显示（没收钱的月份是 0 ✓）")
+    st.caption("柱子的长短就是那个月收了多少 ✓ 12 个月全都列出来了（没收钱的是 0 ✓）")
     st.markdown('<a href="#top" style="font-size:0.85rem">⬆️ 回到顶部</a>',
                 unsafe_allow_html=True)
     st.stop()
@@ -886,7 +921,7 @@ if st.session_state["page"] == "stats":
 # 主页：总欠款 → 搜索 → 添加 → 客户列表（卡片 / 表格） → 图表
 # =====================================================================
 _head1 = (f"📅 **{date.today().year}年**　欠款 "
-          f"**¥{data['欠款金额'].sum():,.0f}**（{len(data)} 笔）")
+          f"**{money_short(data['欠款金额'].sum())}**（{len(data)} 笔）")
 
 # ---------- 客户统计（纯本地计算，不额外联网，不占流量） ----------
 _this_year = date.today().year
@@ -911,8 +946,11 @@ if not _paid_year.empty:
 
 # 第一行：年份 + 欠款；第二行：月收 + 年收（分开两行，手机上不挤）
 st.markdown(_head1)
-_s1, _s2 = st.columns([2.2, 1], vertical_alignment="bottom")
-_s1.markdown(f"月收 **¥{_month_in:,.0f}**　年收 **¥{_money_in:,.0f}**")
+_s1, _s2 = st.columns([2.45, 1], vertical_alignment="center")
+_s1.markdown(
+    f"<div style='font-size:0.8rem;line-height:1.5'>月收 <b>¥{_month_in:,.2f}</b>"
+    f"　年收 <b>¥{_money_in:,.2f}</b></div>",
+    unsafe_allow_html=True)
 if _s2.button("📈 统计", key="go_stats"):
     st.session_state["page"] = "stats"
     st.rerun()
@@ -930,9 +968,8 @@ if st.session_state["clear_search"]:
 
 c_search, c_go, c_add = st.columns([3, 1.4, 1.8], vertical_alignment="bottom")
 keyword = c_search.text_input("搜索", placeholder="", key="search_box",
-                               label_visibility="collapsed")
+                              label_visibility="collapsed")
 c_go.button("确定", type="primary")
-# 「添加客户」挪到「确定」后面，三个排一行
 if c_add.button("➕ 添加", type="primary"):
     st.session_state["show_add"] = not st.session_state["show_add"]
 kw = keyword.strip()
@@ -1004,7 +1041,7 @@ if mode == "🗂️ 卡片式":
     if page_rows.empty:
         st.caption("还没有客户" if data.empty else "没找到匹配的客户")
     else:
-        for _k in ("pay_id", "debt_id"):
+        for _k in ("pay_id", "debt_id", "del_card"):
             if _k not in st.session_state:
                 st.session_state[_k] = -1
 
@@ -1016,7 +1053,12 @@ if mode == "🗂️ 卡片式":
             n_photos = len(split_photos(row["照片"]))
 
             with st.container(border=True):
-                st.markdown(f"{badge} **{cname}**　⏰ {days}")
+                _n1, _n2 = st.columns([5, 1], vertical_alignment="center")
+                _n1.markdown(f"{badge} **{cname}**　⏰ {days}")
+                if _n2.button("🗑️", key=f"delc_{rid}_{cname}", help="删除这个客户"):
+                    st.session_state["del_card"] = (
+                        -1 if st.session_state["del_card"] == rid else rid)
+                    st.rerun()
                 st.markdown(f"未付 **¥{unpaid:,.2f}**"
                             + (f"　｜　📷 {n_photos} 张" if n_photos else ""))
                 b1, b2, b3 = st.columns(3)
@@ -1040,12 +1082,13 @@ if mode == "🗂️ 卡片式":
                 # ---- 就地收钱（累加到已收金额，收款时间记今天）----
                 if st.session_state["pay_id"] == rid:
                     with st.form(f"pay_form_{rid}_{cname}"):
-                        amt = st.number_input("这次收了多少？", min_value=0.0, step=100.0,
-                                              format="%.2f", value=None, key="pay_amt")
-                        st.caption("💡 输完直接按键盘的「开始」/「完成」键就能确定，不用收键盘")
+                        # ⭐ 确定按钮放输入框上面：手机键盘弹起来也点得到，一次就中
                         cc1, cc2 = st.columns(2)
                         go = cc1.form_submit_button("✅ 确定", type="primary")
                         no = cc2.form_submit_button("取消")
+                        amt = st.number_input("这次收了多少？", min_value=0.0, step=100.0,
+                                              format="%.2f", value=None, key="pay_amt")
+                        st.caption("💡 输完按键盘的「开始」键也行")
                     if go:
                         if amt is None or amt <= 0:
                             st.warning("请填写金额")
@@ -1054,7 +1097,8 @@ if mode == "🗂️ 卡片式":
                             new.loc[rid, "已收金额"] = to_float(row["已收金额"]) + amt
                             new.loc[rid, "最后收款时间"] = pd.Timestamp(date.today())
                             st.session_state["pay_id"] = -1
-                            update_ledger(new, f"✅ 「{cname}」已收 ¥{amt:,.2f}")
+                            update_ledger(new, f"✅ 「{cname}」已收 ¥{amt:,.2f}",
+                                          force_reload=True)
                             st.rerun()
                     if no:
                         st.session_state["pay_id"] = -1
@@ -1064,12 +1108,12 @@ if mode == "🗂️ 卡片式":
                 # ---- 就地加欠款（累加到欠款金额）----
                 if st.session_state["debt_id"] == rid:
                     with st.form(f"debt_form_{rid}_{cname}"):
-                        amt2 = st.number_input("这次又欠了多少？", min_value=0.0, step=100.0,
-                                               format="%.2f", value=None, key="debt_amt")
-                        st.caption("💡 输完直接按键盘的「开始」/「完成」键就能确定，不用收键盘")
                         dd1, dd2 = st.columns(2)
                         go2 = dd1.form_submit_button("✅ 确定", type="primary")
                         no2 = dd2.form_submit_button("取消")
+                        amt2 = st.number_input("这次又欠了多少？", min_value=0.0, step=100.0,
+                                               format="%.2f", value=None, key="debt_amt")
+                        st.caption("💡 输完按键盘的「开始」键也行")
                     if go2:
                         if amt2 is None or amt2 <= 0:
                             st.warning("请填写金额")
@@ -1077,10 +1121,24 @@ if mode == "🗂️ 卡片式":
                             new = ledger.copy()
                             new.loc[rid, "欠款金额"] = to_float(row["欠款金额"]) + amt2
                             st.session_state["debt_id"] = -1
-                            update_ledger(new, f"✅ 「{cname}」又欠 ¥{amt2:,.2f}")
+                            update_ledger(new, f"✅ 「{cname}」又欠 ¥{amt2:,.2f}",
+                                          force_reload=True)
                             st.rerun()
                     if no2:
                         st.session_state["debt_id"] = -1
+                        st.rerun()
+
+                # 删除确认（点 🗑️ 之后才会出现，再点"确认删除"才真删）
+                if st.session_state["del_card"] == rid:
+                    st.warning(f"确定删除「{cname}」吗？删了就找不回来了")
+                    _d1, _d2 = st.columns(2)
+                    if _d1.button("⚠️ 确认删除", key=f"yesdel_{rid}_{cname}", type="primary"):
+                        st.session_state["del_card"] = -1
+                        update_ledger(ledger[ledger.index != rid], f"🗑️ 已删除「{cname}」",
+                                      force_reload=True)
+                        st.rerun()
+                    if _d2.button("取消", key=f"nodel_{rid}_{cname}"):
+                        st.session_state["del_card"] = -1
                         st.rerun()
 
                 # 两个表单哪个开着，就自动把光标放进它的输入框（键盘立刻弹出，少点一下）
