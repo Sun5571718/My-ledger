@@ -1,0 +1,17 @@
+name: keep-awake
+
+# 作用：每隔 10 分钟自动访问一次你的台账应用，让它一直醒着（不用等它"睡醒"）
+# 说明：这个任务跑在 GitHub 的服务器上，跟你手机、电脑都没关系，不费电不费流量。
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"      # 每 10 分钟一次（GitHub 有时会晚几分钟，没关系）
+  workflow_dispatch:             # 也可以手动点一下立即运行（用来测试）
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 戳一下应用
+        run: |
+          curl -s -o /dev/null -w "访问结果: HTTP %{http_code}\n" https://my-ledger-2026.streamlit.app/
