@@ -826,7 +826,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v86")
+st.caption("版本 v88")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -948,11 +948,28 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
                 _new.loc[_mid, LOG_COL] = add_log(_mr, "欠", _mv)
                 _msg = f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}"
             update_ledger(_new, _msg, force_reload=True)
-            st.session_state["page"] = "list"
+            # 回到这家客户的详情页（列表会按欠款重排，客户会"跑掉"，详情页不会）
+            st.session_state["page"] = "detail"
             st.rerun()
     if _mno:
-        st.session_state["page"] = "list"
+        st.session_state["page"] = "detail"
         st.rerun()
+
+    # 自动把光标放进金额输入框（键盘直接弹出来，省一次点击）
+    components.html(
+        """<script>
+        (function(){
+          try {
+            var d = window.parent.document;
+            var el = d.querySelector('section.main input[type="number"]')
+                  || d.querySelector('[data-testid="stMain"] input[type="number"]')
+                  || d.querySelector('input[type="number"]');
+            if (el) { el.focus(); }
+          } catch (e) {}
+        })();
+        </script>""",
+        height=0,
+    )
 
     st.stop()
 
@@ -1006,6 +1023,17 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
     st.markdown(f"⏰ **{days}**未回款　｜　欠 ¥{to_float(row['欠款金额']):,.2f}"
                 f"　已收 ¥{to_float(row['已收金额']):,.2f}　未付 **¥{unpaid:,.2f}**")
     st.caption(f"上次收款：{last_txt}")
+
+    # 直接在这家客户这里记账（点错了不用回列表找）
+    _qb1, _qb2 = st.columns(2)
+    if _qb1.button("💰 收钱", key=f"dt_pay_{cur}", type="primary"):
+        st.session_state["page"] = "money"
+        st.session_state["money_kind"] = "pay"
+        st.rerun()
+    if _qb2.button("➕ 欠款", key=f"dt_debt_{cur}", type="primary"):
+        st.session_state["page"] = "money"
+        st.session_state["money_kind"] = "debt"
+        st.rerun()
     st.divider()
 
     # ---------- 照片 ----------
