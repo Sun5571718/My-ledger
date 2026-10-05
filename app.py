@@ -826,7 +826,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v90")
+st.caption("版本 v91")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1325,10 +1325,9 @@ if st.session_state["page"] == "customer" and st.session_state["current_id"] in 
         st.altair_chart((_bars + _txt).properties(width="container", height=380))
 
     # ⭐ 三行清清楚楚，全年收了多少放第一行
+    # 只留两行：全年收款 + 当前未付
     st.markdown(f"📅 **{_ty} 年收款：¥{sum(_m_paid):,.2f}**")
-    st.markdown(f"{_ty} 年欠款：¥{sum(_m_owed):,.2f}")
     st.markdown(f"当前未付：**¥{_owed_c:,.2f}**")
-    st.caption("红柱=那个月又欠了多少 ✓ 绿柱=那个月收回了多少 ✓ 柱子右边直接写着金额 ✓")
     if _other_year:
         st.caption(f"（另有 {_other_year} 笔往年的记录，没算进今年的图里）")
 
