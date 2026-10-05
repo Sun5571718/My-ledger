@@ -656,7 +656,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v51")
+st.caption("版本 v52")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -732,6 +732,8 @@ if "editing_id" not in st.session_state:
     st.session_state["editing_id"] = -1
 if "del_pending" not in st.session_state:
     st.session_state["del_pending"] = -1
+if "scroll_mark" not in st.session_state:
+    st.session_state["scroll_mark"] = "list"
 
 # =====================================================================
 # 详情页（点开客户卡片进来的，一屏搞定这个客户的所有事）
@@ -742,6 +744,25 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
     cname = str(row["客户名称"])
     days = days_text(with_unpaid(pd.DataFrame([row])).iloc[0])
     unpaid = to_float(row["欠款金额"]) - to_float(row["已收金额"])
+
+    # 刚进这个页面时，自动滚到最上面（页面内点按钮不会再滚，不打扰操作）
+    if st.session_state["scroll_mark"] != "detail":
+        st.session_state["scroll_mark"] = "detail"
+        components.html(
+            """<script>
+            (function(){
+              try {
+                window.parent.scrollTo(0, 0);
+                var d = window.parent.document;
+                d.documentElement.scrollTop = 0;
+                d.body.scrollTop = 0;
+                var m = d.querySelector('section.main') || d.querySelector('[data-testid="stMain"]');
+                if (m) { m.scrollTop = 0; }
+              } catch (e) {}
+            })();
+            </script>""",
+            height=0,
+        )
 
     if st.button("← 返回客户列表"):
         st.session_state["page"] = "list"
@@ -870,6 +891,25 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
 # =====================================================================
 if st.session_state["page"] == "stats":
     _y = date.today().year
+    # 刚进这个页面时，自动滚到最上面（页面内点按钮不会再滚，不打扰操作）
+    if st.session_state["scroll_mark"] != "stats":
+        st.session_state["scroll_mark"] = "stats"
+        components.html(
+            """<script>
+            (function(){
+              try {
+                window.parent.scrollTo(0, 0);
+                var d = window.parent.document;
+                d.documentElement.scrollTop = 0;
+                d.body.scrollTop = 0;
+                var m = d.querySelector('section.main') || d.querySelector('[data-testid="stMain"]');
+                if (m) { m.scrollTop = 0; }
+              } catch (e) {}
+            })();
+            </script>""",
+            height=0,
+        )
+
     if st.button("← 返回客户列表"):
         st.session_state["page"] = "list"
         st.rerun()
@@ -916,6 +956,9 @@ if st.session_state["page"] == "stats":
     st.markdown('<a href="#top" style="font-size:0.85rem">⬆️ 回到顶部</a>',
                 unsafe_allow_html=True)
     st.stop()
+
+# 回到主页了 —— 把"自动置顶"的标记清掉，下次再进子页面还会滚到最上面
+st.session_state["scroll_mark"] = "list"
 
 # =====================================================================
 # 主页：总欠款 → 搜索 → 添加 → 客户列表（卡片 / 表格） → 图表
@@ -1082,13 +1125,11 @@ if mode == "🗂️ 卡片式":
                 # ---- 就地收钱（累加到已收金额，收款时间记今天）----
                 if st.session_state["pay_id"] == rid:
                     with st.form(f"pay_form_{rid}_{cname}"):
-                        # ⭐ 确定按钮放输入框上面：手机键盘弹起来也点得到，一次就中
-                        cc1, cc2 = st.columns(2)
-                        go = cc1.form_submit_button("✅ 确定", type="primary")
-                        no = cc2.form_submit_button("取消")
                         amt = st.number_input("这次收了多少？", min_value=0.0, step=100.0,
                                               format="%.2f", value=None, key="pay_amt")
-                        st.caption("💡 输完按键盘的「开始」键也行")
+                        cc1, cc2 = st.columns(2)          # 确定紧跟在输入框下面
+                        go = cc1.form_submit_button("✅ 确定", type="primary")
+                        no = cc2.form_submit_button("取消")
                     if go:
                         if amt is None or amt <= 0:
                             st.warning("请填写金额")
@@ -1108,12 +1149,11 @@ if mode == "🗂️ 卡片式":
                 # ---- 就地加欠款（累加到欠款金额）----
                 if st.session_state["debt_id"] == rid:
                     with st.form(f"debt_form_{rid}_{cname}"):
-                        dd1, dd2 = st.columns(2)
-                        go2 = dd1.form_submit_button("✅ 确定", type="primary")
-                        no2 = dd2.form_submit_button("取消")
                         amt2 = st.number_input("这次又欠了多少？", min_value=0.0, step=100.0,
                                                format="%.2f", value=None, key="debt_amt")
-                        st.caption("💡 输完按键盘的「开始」键也行")
+                        dd1, dd2 = st.columns(2)          # 确定紧跟在输入框下面
+                        go2 = dd1.form_submit_button("✅ 确定", type="primary")
+                        no2 = dd2.form_submit_button("取消")
                     if go2:
                         if amt2 is None or amt2 <= 0:
                             st.warning("请填写金额")
