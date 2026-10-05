@@ -826,7 +826,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v89")
+st.caption("版本 v90")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -992,6 +992,8 @@ if st.session_state["page"] == "del" and st.session_state["current_id"] in ledge
         update_ledger(ledger[ledger.index != _did], f"🗑️ 已删除「{_dn}」",
                       force_reload=True)
         st.session_state["page"] = "list"
+        st.session_state["clear_search"] = True      # 清空搜索，回到干净首页
+        st.session_state["page_no"] = 1
         st.rerun()
     if _dc2.button("取消", key="delpage_no"):
         st.session_state["page"] = "list"
@@ -1148,6 +1150,8 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
                           force_reload=True)
             st.session_state["page"] = "list"
             st.session_state["del_pending"] = -1
+            st.session_state["clear_search"] = True
+            st.session_state["page_no"] = 1
             st.rerun()
         if c2.button("取消"):
             st.session_state["del_pending"] = -1
@@ -1542,6 +1546,8 @@ else:
 
     if deleted:
         update_ledger(new_ledger, f"🗑️ 已删除 {deleted} 位客户")
+        st.session_state["clear_search"] = True
+        st.session_state["page_no"] = 1
         st.rerun()
     elif signature(new_ledger) != signature(ledger):
         update_ledger(new_ledger)
