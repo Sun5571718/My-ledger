@@ -736,6 +736,74 @@ with st.sidebar:
                    + " ✓ 存到网盘就是完整备份 ✓")
 
     st.divider()
+    st.markdown("**📥 从备份包恢复**")
+    st.caption("把之前下载的「完整备份 zip」传回来 → 数据和照片一起恢复 ✓")
+    _rzip = st.file_uploader("选择备份包 (.zip)", type=["zip"], key="restore_zip")
+    st.checkbox("我确认：恢复会覆盖现在的全部数据", key="restore_ok")
+    if st.button("📥 开始恢复", key="restore_go"):
+        if _rzip is None:
+            st.warning("请先选择备份包（.zip）")
+        elif not st.session_state["restore_ok"]:
+            st.warning("请先勾选「我确认」")
+        else:
+            try:
+                with zipfile.ZipFile(io.BytesIO(_rzip.getvalue())) as _zf:
+                    _zl = _zf.namelist()
+                    _main = [n for n in _zl
+                             if n.lower().endswith(".csv") and "对照" not in n]
+                    if not _main:
+                        st.error("备份包里没找到数据表（.csv）")
+                    else:
+                        _rdf = read_csv_bytes(_zf.read(_main[0]))
+                        if _rdf is None or _rdf.empty:
+                            st.error("备份包里的数据表读不出来（或没有有效数据）")
+                        else:
+                            # 照片对照表：(客户名, 第几张) → 包里的路径
+                            _cmap = {}
+                            _mn = [n for n in _zl if "对照" in n and n.endswith(".csv")]
+                            if _mn:
+                                _mdf = pd.read_csv(io.BytesIO(_zf.read(_mn[0])),
+                                                   encoding="utf-8-sig")
+                                for _, _mr2 in _mdf.iterrows():
+                                    try:
+                                        _cmap[(str(_mr2["客户名称"]).strip(),
+                                               int(_mr2["照片序号"]))] = str(_mr2["包内文件名"])
+                                    except Exception:
+                                        continue
+
+                            _okn, _badn = 0, 0
+                            _rdf = _rdf.copy()
+                            _rdf["照片"] = ""
+                            with st.spinner(f"正在恢复 {len(_rdf)} 条数据、重新上传照片…"):
+                                for _i2, _row2 in _rdf.iterrows():
+                                    _cn2 = str(_row2["客户名称"]).strip()
+                                    _got = []
+                                    _k2 = 1
+                                    while (_cn2, _k2) in _cmap:
+                                        _path2 = _cmap[(_cn2, _k2)]
+                                        try:
+                                            _blob2 = _zf.read(_path2)
+                                        except Exception:
+                                            _badn += 1
+                                            _k2 += 1
+                                            continue
+                                        _ext2 = ("." + _path2.rsplit(".", 1)[-1]
+                                                 if "." in _path2 else ".jpg")
+                                        _got.append(save_photo(_cn2, _blob2, _ext2))
+                                        _okn += 1
+                                        _k2 += 1
+                                    _rdf.at[_i2, "照片"] = join_photos(_got)
+                            _rdf[ID_COL] = 0        # 全部当新行插入，云端旧行会被自动清掉
+                            update_ledger(
+                                _rdf,
+                                f"✅ 已恢复 {len(_rdf)} 条数据、{_okn} 张照片"
+                                + (f"（{_badn} 张在包里缺失）" if _badn else ""),
+                                force_reload=True)
+                            st.rerun()
+            except Exception as _rex:
+                st.error(f"恢复失败：{_rex}")
+
+    st.divider()
     st.markdown("**🧪 测试数据**")
     if st.button("载入 6 条示例数据"):
         update_ledger(sample_data(), "✅ 已载入示例数据（替换了原有数据）")
@@ -758,7 +826,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v85")
+st.caption("版本 v86")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
