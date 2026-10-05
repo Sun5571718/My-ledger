@@ -28,6 +28,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+import json
 
 try:
     import altair as alt
@@ -300,6 +301,34 @@ def days_text(row) -> str:
     return f"{int(days)} 天"
 
 
+# 那个早就没用的「客户位置」列，现在拿来存这位客户的往来流水（不用改数据库）
+LOG_COL = "客户位置"
+
+
+def load_log(row) -> list:
+    """读出一位客户的流水：一串 {"d": 日期, "t": 欠/收, "v": 金额}"""
+    raw = str(row.get(LOG_COL, "") or "").strip()
+    if not raw.startswith("["):
+        return []
+    try:
+        items = json.loads(raw)
+    except Exception:
+        return []
+    return items if isinstance(items, list) else []
+
+
+def dump_log(items: list) -> str:
+    return json.dumps(items, ensure_ascii=False) if items else ""
+
+
+def add_log(row, kind: str, amount: float, when=None) -> str:
+    """往流水里加一条：kind 是「欠」或「收」"""
+    items = load_log(row)
+    items.append({"d": str(when if when is not None else date.today()),
+                  "t": kind, "v": round(float(amount), 2)})
+    return dump_log(items)
+
+
 def money_short(v) -> str:
     """手机上一眼能看懂的金额：1 万及以上用「万」（保留 1 位小数），1 万以下显示元。"""
     v = to_float(v)
@@ -398,7 +427,7 @@ def shrink_image(data: bytes, suffix: str):
     先压缩到最长边 1600 像素、JPEG 质量 80，通常只剩 300KB 左右，快 10 倍。
     压不了就原样返回，绝不因为压缩失败而存不上。
     """
-    if len(data) < 400_000:          # 本来就小，不动它
+    if len(data) < 200_000:          # 本来就小，不动它
         return data, suffix
     try:
         from PIL import Image
@@ -406,12 +435,15 @@ def shrink_image(data: bytes, suffix: str):
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
         w, h = img.size
-        if max(w, h) > 1600:
-            scale = 1600 / max(w, h)
+        if max(w, h) > 1280:                 # 最长边压到 1280 像素（手机上够清楚）
+            scale = 1280 / max(w, h)
             img = img.resize((int(w * scale), int(h * scale)))
         out = io.BytesIO()
-        img.save(out, format="JPEG", quality=80, optimize=True)
-        return out.getvalue(), ".jpg"
+        img.save(out, format="JPEG", quality=72, optimize=True)
+        small = out.getvalue()
+        if len(small) >= len(data):          # 万一压完反而更大，就用原来的
+            return data, suffix
+        return small, ".jpg"
     except Exception:
         return data, suffix
 
@@ -656,12 +688,22 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v52")
+st.caption("版本 v64")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
     """
     <style>
+    /* 卡片上的客户名（做成能点的文字，看起来还是标题） */
+    [data-testid="stBaseButton-tertiary"] {
+        justify-content: flex-start !important;
+        text-align: left !important;
+        font-size: 1rem !important;
+        font-weight: 700 !important;
+        padding: 0.05rem 0 !important;
+        min-height: 1.6rem !important;
+    }
+
     /* "📈 统计"小按钮：小一号，紧跟在"年收"后面，不抢戏 */
     .st-key-go_stats { margin-top: 0.1rem !important; }
     .st-key-go_stats button {
@@ -797,16 +839,22 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
             st.warning(f"最多还能加 {room} 张，只存前 {room} 张。")
             pending_photos = pending_photos[:room]
         if st.button(f"💾 保存照片（还能加 {room} 张）", disabled=not pending_photos, type="primary"):
+            _before = sum(len(_b) for _b, _s in pending_photos)
             try:
                 with st.spinner(f"上传中…（{len(pending_photos)} 张）"):
                     saved = [save_photo(cname, blob, sfx) for blob, sfx in pending_photos]
+                    _after = sum(
+                        len(_b) for _b, _s in
+                        [shrink_image(_b, _s) for _b, _s in pending_photos])
             except CloudError as exc:
                 st.error(str(exc))
             else:
                 new = ledger.copy()
                 new.loc[cur, "照片"] = join_photos(photos + saved)
                 st.session_state["photo_key"] += 1
-                update_ledger(new, f"✅ 已保存 {len(saved)} 张")
+                _saved_txt = (f"（{_before / 1024 / 1024:.1f}MB → "
+                              f"{_after / 1024:.0f}KB）" if _before > _after else "")
+                update_ledger(new, f"✅ 已保存 {len(saved)} 张{_saved_txt}")
                 st.session_state["page"] = "list"        # 存完自动回列表
                 st.rerun()
 
@@ -935,24 +983,165 @@ if st.session_state["page"] == "stats":
     elif alt is None:
         st.bar_chart(_chart_df.set_index("月份"))
     else:
-        _ch = (
+        _xmax1 = max(max(_vals) * 1.35, 1.0)
+
+        _bars = (
             alt.Chart(_chart_df)
-            .mark_bar(color="#2E8B57")
+            .mark_bar(color="#2E8B57", size=10)
             .encode(
                 # 月份竖着排：手机上 12 个月的标签全都能显示出来
                 y=alt.Y("月份:N", sort=_labels, title=None,
-                        axis=alt.Axis(labelFontSize=12)),
+                        axis=alt.Axis(labelFontSize=14)),
                 x=alt.X("收款:Q", title="收款（元）",
-                        axis=alt.Axis(format="~s", labelFontSize=11)),
+                        scale=alt.Scale(domain=[0, _xmax1]),     # 右边留白
+                        axis=alt.Axis(labelFontSize=10, format=",.0f")),
                 tooltip=[alt.Tooltip("月份:N"), alt.Tooltip("收款:Q", format=",.2f")],
             )
-            .properties(width="container", height=330)
         )
-        st.altair_chart(_ch)
+        _txt = (
+            alt.Chart(_chart_df)
+            .transform_filter("datum['收款'] > 0")
+            .mark_text(align="left", dx=4, fontSize=11, color="#333")
+            .encode(
+                y=alt.Y("月份:N", sort=_labels, title=None),
+                x=alt.X("收款:Q"),
+                text=alt.Text("收款:Q", format=",.0f"),
+            )
+        )
+        st.altair_chart((_bars + _txt).properties(width="container", height=330))
 
     st.markdown(f"**全年合计 ¥{sum(_vals):,.2f}**　｜　"
                 f"本月（{date.today().month}月）¥{_vals[date.today().month - 1]:,.2f}")
-    st.caption("柱子的长短就是那个月收了多少 ✓ 12 个月全都列出来了（没收钱的是 0 ✓）")
+    st.caption("柱子的长短就是那个月收了多少 ✓ 柱子右边直接写着金额 ✓ 12 个月全都在 ✓")
+    st.markdown('<a href="#top" style="font-size:0.85rem">⬆️ 回到顶部</a>',
+                unsafe_allow_html=True)
+    st.stop()
+
+# =====================================================================
+# 客户往来明细页（点卡片上的客户名进来）
+# =====================================================================
+if st.session_state["page"] == "customer" and st.session_state["current_id"] in ledger.index:
+    _cid = st.session_state["current_id"]
+    _cr = ledger.loc[_cid]
+    _cn = str(_cr["客户名称"])
+
+    if st.session_state["scroll_mark"] != "customer":
+        st.session_state["scroll_mark"] = "customer"
+        components.html(
+            """<script>
+            (function(){
+              try {
+                window.parent.scrollTo(0, 0);
+                var d = window.parent.document;
+                d.documentElement.scrollTop = 0;
+                d.body.scrollTop = 0;
+                var m = d.querySelector('section.main') || d.querySelector('[data-testid="stMain"]');
+                if (m) { m.scrollTop = 0; }
+              } catch (e) {}
+            })();
+            </script>""",
+            height=0,
+        )
+
+    if st.button("← 返回客户列表"):
+        st.session_state["page"] = "list"
+        st.rerun()
+
+    st.markdown(f"### 👤 {_cn}")
+    _owed_c = to_float(_cr["欠款金额"]) - to_float(_cr["已收金额"])   # 当前未付
+
+    # ---- 流水：老数据没记录，就补一条"历史记录"，看着才完整 ----
+    _logs = load_log(_cr)
+    if not _logs:
+        _seed = []
+        if to_float(_cr["欠款金额"]) > 0:
+            _d0 = ("（没记日期）" if pd.isna(_cr["欠款日期"])
+                   else str(pd.Timestamp(_cr["欠款日期"]).date()))
+            _seed.append({"d": _d0, "t": "欠", "v": round(to_float(_cr["欠款金额"]), 2),
+                          "old": 1})
+        if to_float(_cr["已收金额"]) > 0:
+            _d1 = ("（没记日期）" if pd.isna(_cr["最后收款时间"])
+                   else str(pd.Timestamp(_cr["最后收款时间"]).date()))
+            _seed.append({"d": _d1, "t": "收", "v": round(to_float(_cr["已收金额"]), 2),
+                          "old": 1})
+        _logs = _seed
+
+    # ---- 按月归堆 ----
+    _ty = str(date.today().year)
+    _m_owed = [0.0] * 12
+    _m_paid = [0.0] * 12
+    _other_year = 0
+    for _it in _logs:
+        _d = str(_it.get("d", ""))
+        if _d[:4] != _ty:
+            _other_year += 1
+            continue
+        try:
+            _mo = int(_d[5:7])
+        except Exception:
+            continue
+        if not (1 <= _mo <= 12):
+            continue
+        _v = float(_it.get("v", 0) or 0)
+        if str(_it.get("t")) == "收":
+            _m_paid[_mo - 1] += _v
+        else:
+            _m_owed[_mo - 1] += _v
+
+    # ---- 图形：每个月两根柱子（红=欠款、绿=收款），柱子右边直接写金额 ----
+    _order = [f"{m}月" for m in range(1, 13)]
+    _mdf = pd.DataFrame({"月份": _order, "欠款": _m_owed, "收款": _m_paid})
+    _long = _mdf.melt(id_vars="月份", value_vars=["欠款", "收款"],
+                      var_name="类型", value_name="金额")
+    _xmax = max(max(_m_owed + _m_paid) * 1.35, 1.0)     # 右边留白，数字不被切
+
+    if alt is None:
+        st.bar_chart(_mdf.set_index("月份"))
+    else:
+        _bars = (
+            alt.Chart(_long)
+            .mark_bar(size=8)
+            .encode(
+                y=alt.Y("月份:N", sort=_order, title=None,
+                        axis=alt.Axis(labelFontSize=14)),
+                yOffset=alt.YOffset("类型:N"),
+                x=alt.X("金额:Q", title="金额（元）",
+                        scale=alt.Scale(domain=[0, _xmax]),
+                        axis=alt.Axis(labelFontSize=10, format=",.0f")),
+                color=alt.Color("类型:N", title=None,
+                                scale=alt.Scale(domain=["欠款", "收款"],
+                                                range=["#E4572E", "#2E8B57"]),
+                                legend=alt.Legend(orient="top", labelFontSize=12)),
+                tooltip=[alt.Tooltip("月份:N"), alt.Tooltip("类型:N"),
+                         alt.Tooltip("金额:Q", format=",.2f")],
+            )
+        )
+        _txt = (
+            alt.Chart(_long)
+            .transform_filter("datum['金额'] > 0")      # 0 就不标，省得满屏小 0
+            .mark_text(align="left", dx=4, fontSize=11, color="#333")
+            .encode(
+                y=alt.Y("月份:N", sort=_order, title=None),
+                yOffset=alt.YOffset("类型:N"),
+                x=alt.X("金额:Q"),
+                text=alt.Text("金额:Q", format=",.0f"),
+            )
+        )
+        st.altair_chart((_bars + _txt).properties(width="container", height=380))
+
+    # ⭐ 三行清清楚楚，全年收了多少放第一行
+    st.markdown(f"📅 **{_ty} 年收款：¥{sum(_m_paid):,.2f}**")
+    st.markdown(f"{_ty} 年欠款：¥{sum(_m_owed):,.2f}")
+    st.markdown(f"当前未付：**¥{_owed_c:,.2f}**")
+    st.caption("红柱=那个月又欠了多少 ✓ 绿柱=那个月收回了多少 ✓ 柱子右边直接写着金额 ✓")
+    if _other_year:
+        st.caption(f"（另有 {_other_year} 笔往年的记录，没算进今年的图里）")
+
+    st.divider()
+    if st.button("📷 拍照 / 修改资料", type="primary"):
+        st.session_state["page"] = "detail"
+        st.rerun()
+
     st.markdown('<a href="#top" style="font-size:0.85rem">⬆️ 回到顶部</a>',
                 unsafe_allow_html=True)
     st.stop()
@@ -1097,7 +1286,16 @@ if mode == "🗂️ 卡片式":
 
             with st.container(border=True):
                 _n1, _n2 = st.columns([5, 1], vertical_alignment="center")
-                _n1.markdown(f"{badge} **{cname}**　⏰ {days}")
+                _title = f"{badge} {cname}　⏰ {days}"
+                try:
+                    _clicked = _n1.button(_title, key=f"open_cust_{rid}_{cname}",
+                                          type="tertiary")
+                except TypeError:
+                    _clicked = _n1.button(_title, key=f"open_cust_{rid}_{cname}")
+                if _clicked:
+                    st.session_state["page"] = "customer"
+                    st.session_state["current_id"] = rid
+                    st.rerun()
                 if _n2.button("🗑️", key=f"delc_{rid}_{cname}", help="删除这个客户"):
                     st.session_state["del_card"] = (
                         -1 if st.session_state["del_card"] == rid else rid)
@@ -1137,6 +1335,7 @@ if mode == "🗂️ 卡片式":
                             new = ledger.copy()
                             new.loc[rid, "已收金额"] = to_float(row["已收金额"]) + amt
                             new.loc[rid, "最后收款时间"] = pd.Timestamp(date.today())
+                            new.loc[rid, LOG_COL] = add_log(row, "收", amt)   # 记一条流水
                             st.session_state["pay_id"] = -1
                             update_ledger(new, f"✅ 「{cname}」已收 ¥{amt:,.2f}",
                                           force_reload=True)
@@ -1160,6 +1359,7 @@ if mode == "🗂️ 卡片式":
                         else:
                             new = ledger.copy()
                             new.loc[rid, "欠款金额"] = to_float(row["欠款金额"]) + amt2
+                            new.loc[rid, LOG_COL] = add_log(row, "欠", amt2)   # 记一条流水
                             st.session_state["debt_id"] = -1
                             update_ledger(new, f"✅ 「{cname}」又欠 ¥{amt2:,.2f}",
                                           force_reload=True)
