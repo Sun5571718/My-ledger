@@ -826,7 +826,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v91")
+st.caption("版本 v92")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1283,48 +1283,39 @@ if st.session_state["page"] == "customer" and st.session_state["current_id"] in 
         else:
             _m_owed[_mo - 1] += _v
 
-    # ---- 图形：每个月两根柱子（红=欠款、绿=收款），柱子右边直接写金额 ----
+    # ---- 图形：每个月一根柱子，只显示"那个月收了多少" ----
     _order = [f"{m}月" for m in range(1, 13)]
-    _mdf = pd.DataFrame({"月份": _order, "欠款": _m_owed, "收款": _m_paid})
-    _long = _mdf.melt(id_vars="月份", value_vars=["欠款", "收款"],
-                      var_name="类型", value_name="金额")
-    _xmax = max(max(_m_owed + _m_paid) * 1.35, 1.0)     # 右边留白，数字不被切
+    _pay_df = pd.DataFrame({"月份": _order, "收款": _m_paid})
+    _xmax = max(max(_m_paid) * 1.35, 1.0)          # 右边留白，数字不被切
 
     if alt is None:
-        st.bar_chart(_mdf.set_index("月份"))
+        st.bar_chart(_pay_df.set_index("月份"))
     else:
         _bars = (
-            alt.Chart(_long)
-            .mark_bar(size=8)
+            alt.Chart(_pay_df)
+            .mark_bar(color="#2E8B57", size=10)
             .encode(
                 y=alt.Y("月份:N", sort=_order, title=None,
                         axis=alt.Axis(labelFontSize=14)),
-                yOffset=alt.YOffset("类型:N"),
-                x=alt.X("金额:Q", title="金额（元）",
+                x=alt.X("收款:Q", title="收款（元）",
                         scale=alt.Scale(domain=[0, _xmax]),
                         axis=alt.Axis(labelFontSize=10, format=",.0f")),
-                color=alt.Color("类型:N", title=None,
-                                scale=alt.Scale(domain=["欠款", "收款"],
-                                                range=["#E4572E", "#2E8B57"]),
-                                legend=alt.Legend(orient="top", labelFontSize=12)),
-                tooltip=[alt.Tooltip("月份:N"), alt.Tooltip("类型:N"),
-                         alt.Tooltip("金额:Q", format=",.2f")],
+                tooltip=[alt.Tooltip("月份:N"),
+                         alt.Tooltip("收款:Q", format=",.2f")],
             )
         )
         _txt = (
-            alt.Chart(_long)
-            .transform_filter("datum['金额'] > 0")      # 0 就不标，省得满屏小 0
+            alt.Chart(_pay_df)
+            .transform_filter("datum['收款'] > 0")   # 没收钱的月份就不标字
             .mark_text(align="left", dx=4, fontSize=11, color="#333")
             .encode(
                 y=alt.Y("月份:N", sort=_order, title=None),
-                yOffset=alt.YOffset("类型:N"),
-                x=alt.X("金额:Q"),
-                text=alt.Text("金额:Q", format=",.0f"),
+                x=alt.X("收款:Q"),
+                text=alt.Text("收款:Q", format=",.0f"),
             )
         )
         st.altair_chart((_bars + _txt).properties(width="container", height=380))
 
-    # ⭐ 三行清清楚楚，全年收了多少放第一行
     # 只留两行：全年收款 + 当前未付
     st.markdown(f"📅 **{_ty} 年收款：¥{sum(_m_paid):,.2f}**")
     st.markdown(f"当前未付：**¥{_owed_c:,.2f}**")
