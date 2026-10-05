@@ -826,7 +826,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v88")
+st.caption("版本 v89")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1421,7 +1421,8 @@ if st.session_state["show_add"]:
                 "客户位置": "",
                 "照片": "",
             }])
-            st.session_state["pending_search"] = name.strip()
+            st.session_state["show_add"] = False          # 保存后自动收起添加表单
+            st.session_state["pending_search"] = name.strip()   # 顺便筛出这位新客户
             update_ledger(pd.concat([ledger, new_row], ignore_index=True),
                           f"✅ 已添加「{name.strip()}」")
             st.rerun()
