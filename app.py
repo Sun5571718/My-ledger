@@ -826,7 +826,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v92")
+st.caption("版本 v93")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1390,6 +1390,14 @@ c_go.button("确定", type="primary")
 if c_add.button("➕ 添加", type="primary"):
     st.session_state["show_add"] = not st.session_state["show_add"]
 kw = keyword.strip()
+
+# 搜过客户之后，给一个"清空"按钮 —— 手机上不用去手动删输入框里的字
+if kw:
+    _kw1, _kw2 = st.columns([3, 1], vertical_alignment="center")
+    _kw1.caption(f"🔍 正在搜索「{kw}」")
+    if _kw2.button("✕ 清空", key="clear_kw_btn"):
+        st.session_state["clear_search"] = True
+        st.rerun()
 
 if st.session_state["show_add"]:
     with st.form("add_form", clear_on_submit=True):
