@@ -36,7 +36,7 @@ try:
 except ImportError:
     alt = None
 
-st.set_page_config(page_title="客户欠款台账", page_icon="💰", layout="wide")
+st.set_page_config(page_title="客户待回款台账", page_icon="💰", layout="wide")
 
 
 # =====================================================================
@@ -825,8 +825,8 @@ with st.sidebar:
 
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
-st.markdown("#### 💰 客户欠款台账")
-st.caption("版本 v93")
+st.markdown("#### 💰 客户待回款台账")
+st.caption("版本 v96")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1337,8 +1337,10 @@ st.session_state["scroll_mark"] = "list"
 # =====================================================================
 # 主页：总欠款 → 搜索 → 添加 → 客户列表（卡片 / 表格） → 图表
 # =====================================================================
-_head1 = (f"📅 **{date.today().year}年**　欠款 "
-          f"**{money_short(data['欠款金额'].sum())}**（{len(data)} 笔）")
+# 顶行：未付（客户还欠多少，实时）+ 笔数（一个客户算一笔）
+_head1 = (f"📅 **{date.today().year}年**　"
+          f"应收款 **{money_short(data['未付金额'].sum())}**"
+          f"（{len(data)} 笔）")
 
 # ---------- 客户统计（纯本地计算，不额外联网，不占流量） ----------
 _this_year = date.today().year
