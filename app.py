@@ -826,7 +826,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v96")
+st.caption("版本 v98")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -917,7 +917,8 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
     _is_pay = st.session_state["money_kind"] == "pay"
     _m_owed = to_float(_mr["欠款金额"]) - to_float(_mr["已收金额"])
 
-    if st.button("← 返回客户列表", key="money_back"):
+    _rb1, _rb2 = st.columns([2, 2])
+    if _rb2.button("← 返回客户列表", key="money_back"):
         st.session_state["page"] = "list"
         st.rerun()
 
@@ -980,7 +981,8 @@ if st.session_state["page"] == "del" and st.session_state["current_id"] in ledge
     _did = st.session_state["current_id"]
     _dn = str(ledger.loc[_did, "客户名称"])
 
-    if st.button("← 返回客户列表", key="delpage_back"):
+    _rb1, _rb2 = st.columns([2, 2])
+    if _rb2.button("← 返回客户列表", key="delpage_back"):
         st.session_state["page"] = "list"
         st.rerun()
 
@@ -1013,7 +1015,8 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
 
     # 刚进这个页面时，自动滚到最上面（页面内点按钮不会再滚，不打扰操作）
 
-    if st.button("← 返回客户列表"):
+    _rb1, _rb2 = st.columns([2, 2])
+    if _rb2.button("← 返回客户列表"):
         st.session_state["page"] = "list"
         st.session_state["editing_id"] = -1
         st.session_state["del_pending"] = -1
@@ -1168,63 +1171,95 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
 # =====================================================================
 if st.session_state["page"] == "stats":
     _y = date.today().year
-    # 刚进这个页面时，自动滚到最上面（页面内点按钮不会再滚，不打扰操作）
-
-    if st.button("← 返回客户列表"):
+    _ynow = str(_y)
+    _rb1, _rb2 = st.columns([2, 2])
+    if _rb2.button("← 返回客户列表", key="stats_back"):
         st.session_state["page"] = "list"
         st.rerun()
-    st.markdown(f"### 📈 {_y} 年收款统计")
+    st.markdown(f"### 📈 {_y} 年收款 / 欠款统计")
 
-    _ys = (pd.to_datetime(data["最后收款时间"], errors="coerce").dt.year
-           if not data.empty else None)
-    _paid = data.loc[_ys == _y] if (not data.empty and _ys is not None) else data.iloc[0:0]
-    _grp2 = (data.iloc[0:0].assign(月=[], 金额=[]).groupby("月")["金额"].sum()
-             if _paid.empty
-             else _paid.assign(月=pd.to_datetime(_paid["最后收款时间"]).dt.month)
-                      .groupby("月")["已收金额"].sum())
+    # ---- 把每位客户的流水按月归堆（老数据没流水的，用欠款日期+金额补一条）----
+    _m_paid_all = [0.0] * 12
+    _m_owed_all = [0.0] * 12
+    for _, _r in data.iterrows():
+        _items = load_log(_r)
+        if not _items and to_float(_r["欠款金额"]) > 0:
+            _d0 = ("" if pd.isna(_r["欠款日期"])
+                   else str(pd.Timestamp(_r["欠款日期"]).date()))
+            _items = [{"d": _d0, "t": "欠", "v": to_float(_r["欠款金额"])}]
+        for _it in _items:
+            _d = str(_it.get("d", ""))
+            if _d[:4] != _ynow:
+                continue
+            try:
+                _mo = int(_d[5:7])
+            except Exception:
+                continue
+            if not (1 <= _mo <= 12):
+                continue
+            _v = float(_it.get("v", 0) or 0)
+            if str(_it.get("t")) == "收":
+                _m_paid_all[_mo - 1] += _v
+            else:
+                _m_owed_all[_mo - 1] += _v
 
     _labels = [f"{m}月" for m in range(1, 13)]
-    _vals = [float(_grp2.get(m, 0.0)) for m in range(1, 13)]
-    _chart_df = pd.DataFrame({"月份": _labels, "收款": _vals})
+    _chart_df = pd.DataFrame({"月份": _labels,
+                              "收款": _m_paid_all,
+                              "欠款": _m_owed_all})
+    _long2 = _chart_df.melt(id_vars="月份", value_vars=["欠款", "收款"],
+                            var_name="类型", value_name="金额")
+    _in_year = sum(_m_paid_all)
+    _ow_year = sum(_m_owed_all)
+    _mo_now = date.today().month
 
-    if sum(_vals) <= 0:
-        # 今年一分钱都还没收到 —— 别显示一张空的怪图，直接说人话
-        st.info("📭 今年还没有收款记录。\n\n"
-                "等你在客户卡片上点「💰 收钱」记下第一笔，"
-                "这里就会出现 12 个月的柱状图 ✓")
-    elif alt is None:
-        st.bar_chart(_chart_df.set_index("月份"))
+    if _in_year <= 0 and _ow_year <= 0:
+        st.info("📭 今年还没有收款/欠款记录。\n\n"
+                "在客户卡片上点「💰 收钱」或「➕ 欠款」记下第一笔，"
+                "这里就会出现逐月的柱子 ✓")
     else:
-        _xmax1 = max(max(_vals) * 1.35, 1.0)
-
-        _bars = (
-            alt.Chart(_chart_df)
-            .mark_bar(color="#2E8B57", size=10)
-            .encode(
-                # 月份竖着排：手机上 12 个月的标签全都能显示出来
-                y=alt.Y("月份:N", sort=_labels, title=None,
-                        axis=alt.Axis(labelFontSize=14)),
-                x=alt.X("收款:Q", title="收款（元）",
-                        scale=alt.Scale(domain=[0, _xmax1]),     # 右边留白
-                        axis=alt.Axis(labelFontSize=10, format=",.0f")),
-                tooltip=[alt.Tooltip("月份:N"), alt.Tooltip("收款:Q", format=",.2f")],
+        _xmax2 = max(max(_m_paid_all + _m_owed_all) * 1.35, 1.0)
+        if alt is None:
+            st.bar_chart(_chart_df.set_index("月份"))
+        else:
+            _bars2 = (
+                alt.Chart(_long2)
+                .mark_bar(size=8)
+                .encode(
+                    y=alt.Y("月份:N", sort=_labels, title=None,
+                            axis=alt.Axis(labelFontSize=14)),
+                    yOffset=alt.YOffset("类型:N"),
+                    x=alt.X("金额:Q", title="金额（元）",
+                            scale=alt.Scale(domain=[0, _xmax2]),
+                            axis=alt.Axis(labelFontSize=10, format=",.0f")),
+                    color=alt.Color("类型:N", title=None,
+                                    scale=alt.Scale(domain=["欠款", "收款"],
+                                                    range=["#E4572E", "#2E8B57"]),
+                                    legend=alt.Legend(orient="top",
+                                                      labelFontSize=12)),
+                    tooltip=[alt.Tooltip("月份:N"), alt.Tooltip("类型:N"),
+                             alt.Tooltip("金额:Q", format=",.2f")],
+                )
             )
-        )
-        _txt = (
-            alt.Chart(_chart_df)
-            .transform_filter("datum['收款'] > 0")
-            .mark_text(align="left", dx=4, fontSize=11, color="#333")
-            .encode(
-                y=alt.Y("月份:N", sort=_labels, title=None),
-                x=alt.X("收款:Q"),
-                text=alt.Text("收款:Q", format=",.0f"),
+            _txt2 = (
+                alt.Chart(_long2)
+                .transform_filter("datum['金额'] > 0")
+                .mark_text(align="left", dx=4, fontSize=10, color="#333")
+                .encode(
+                    y=alt.Y("月份:N", sort=_labels, title=None),
+                    yOffset=alt.YOffset("类型:N"),
+                    x=alt.X("金额:Q"),
+                    text=alt.Text("金额:Q", format=",.0f"),
+                )
             )
-        )
-        st.altair_chart((_bars + _txt).properties(width="container", height=330))
+            st.altair_chart((_bars2 + _txt2).properties(width="container",
+                                                        height=380))
 
-    st.markdown(f"**全年合计 ¥{sum(_vals):,.2f}**　｜　"
-                f"本月（{date.today().month}月）¥{_vals[date.today().month - 1]:,.2f}")
-    st.caption("柱子的长短就是那个月收了多少 ✓ 柱子右边直接写着金额 ✓ 12 个月全都在 ✓")
+    st.markdown(f"**{_y} 年欠款合计：¥{_ow_year:,.2f}**")
+    st.markdown(f"**{_y} 年收款合计：¥{_in_year:,.2f}**")
+    st.markdown(f"本月（{_mo_now}月）欠款 ¥{_m_owed_all[_mo_now - 1]:,.2f}"
+                f"　｜　收款 ¥{_m_paid_all[_mo_now - 1]:,.2f}")
+    st.caption("红柱=那个月新增欠款 ✓ 绿柱=那个月收款 ✓ 点柱子看具体数字 ✓")
     st.markdown('<a href="#top" style="font-size:0.85rem">⬆️ 回到顶部</a>',
                 unsafe_allow_html=True)
     st.stop()
@@ -1238,7 +1273,8 @@ if st.session_state["page"] == "customer" and st.session_state["current_id"] in 
     _cn = str(_cr["客户名称"])
 
 
-    if st.button("← 返回客户列表"):
+    _rb1, _rb2 = st.columns([2, 2])
+    if _rb2.button("← 返回客户列表"):
         st.session_state["page"] = "list"
         st.rerun()
 
