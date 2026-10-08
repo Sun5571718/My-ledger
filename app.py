@@ -70,6 +70,13 @@ DATE_FIELDS = ["欠款日期", "最后收款时间"]
 FIELDS = ["客户名称", "欠款金额", "已收金额", "欠款日期", "最后收款时间", "备注", "客户位置", "照片"]
 EDITABLE_FIELDS = ["客户名称", "欠款金额", "已收金额", "欠款日期", "最后收款时间", "备注", "客户位置"]
 
+# 界面配色（改这里全局生效）
+CLR_OWED = "#E4572E"      # 待回款 / 还欠着 —— 橙红
+# 已回款 / 收到手：原来用绿色，主人不喜欢绿 → 跟随主题文字色
+# （浅色主题下就是黑的；万一哪天用深色主题，也不会变成看不见的黑字）
+CLR_PAID = "inherit"
+CLR_DONE = "#8E8E8E"      # 已结清 / 没日期 —— 灰
+
 
 class CloudError(RuntimeError):
     """云端出问题时抛这个，界面负责显示成人话。"""
@@ -365,6 +372,24 @@ def days_badge(row) -> str:
     return "🔴"
 
 
+def days_color(row) -> str:
+    """未回款天数对应的颜色（跟 🟢🟡🟠🔴 一套），拿来给卡片上色。
+    已结清、日期不详 → 灰色。"""
+    if to_float(row["未付金额"]) <= 0:
+        return CLR_DONE
+    d = unpaid_days(row["欠款日期"])
+    if pd.isna(d):
+        return CLR_DONE
+    d = int(d)
+    if d <= 30:
+        return "#2E8B57"      # 🟢 绿
+    if d <= 60:
+        return "#C9A227"      # 🟡 黄
+    if d <= 90:
+        return "#E08A1E"      # 🟠 橙
+    return "#C62828"          # 🔴 红
+
+
 def mask_name(name: str) -> str:
     text = str(name)
     if len(text) <= 1:
@@ -593,6 +618,8 @@ if "show_add" not in st.session_state:
     st.session_state["show_add"] = False        # 默认收起：不点「➕ 添加客户」就不展开
 if "mask_names" not in st.session_state:
     st.session_state["mask_names"] = False
+if "view_mode" not in st.session_state:
+    st.session_state["view_mode"] = "🗂️ 卡片式"
 if "clear_search" not in st.session_state:
     st.session_state["clear_search"] = False
 if "cloud_error" not in st.session_state:
@@ -826,21 +853,42 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v98")
+st.caption("版本 v110")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
     """
     <style>
-    /* "📈 统计"小按钮：小一号，紧跟在"年收"后面，不抢戏 */
-    .st-key-go_stats { margin-top: 0.1rem !important; }
-    .st-key-go_stats button {
-        font-size: 0.68rem !important;
-        padding: 0.05rem 0.4rem !important;
-        min-height: 1.6rem !important;
+    /* 顶部四个按钮（格式 / 统计 / 确定 / 新建）：一样宽一样高，两列严格对齐 */
+    .st-key-go_fmt button,
+    .st-key-go_stats button,
+    .st-key-btn_search button,
+    .st-key-btn_add button {
+        width: 100% !important;
+        min-width: 0 !important;
+        font-size: 0.78rem !important;
+        padding: 0.1rem 0.3rem !important;
+        min-height: 1.95rem !important;
+        height: 1.95rem !important;
         line-height: 1.2 !important;
         border-radius: 0.5rem !important;
     }
+
+    /* 返回键：统一小一点，保证在最右 1/4 里显示完整 */
+    .st-key-money_back button,
+    .st-key-delpage_back button,
+    .st-key-detail_back button,
+    .st-key-stats_back button,
+    .st-key-cust_back button {
+        font-size: 0.72rem !important;
+        padding: 0.1rem 0.25rem !important;
+        min-height: 1.85rem !important;
+        white-space: nowrap !important;
+    }
+
+    /* （旧版「统计」是个跟在"年收"后面的小按钮，所以单独调小过；
+       现在它已经和另外三个键并排了，那两条规则必须删掉，
+       否则「统计」字更小、还高 0.1rem，四键就不齐了） */
 
     /* 藏掉输入框下面那行英文 "Press Enter to submit form"（我们用中文提示代替） */
     [data-testid="InputInstructions"] { display: none !important; }
@@ -880,8 +928,12 @@ st.markdown(
     div[data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; align-items: flex-end; }
     div[data-testid="stHorizontalBlock"] > div { min-width: 0 !important; }
 
-    /* 搜索框视觉上短一点（不影响「确定」那一列） */
-    .st-key-search_box input { max-width: 150px; }
+    /* 搜索框：宽度不再硬限制，改由卡片里那一行的列宽控制（见「🔍 客户搜索栏」） */
+    .st-key-search_box input { padding-left: 0.55rem !important; }
+
+    /* 「🔍 客户搜索栏」往下贴着输入框：容器 gap=0 + 把标识和控件自带的边距抹掉 */
+    .st-key-search_row [data-testid="stCaptionContainer"] { margin-bottom: 0 !important; }
+    .st-key-search_row [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -917,15 +969,21 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
     _is_pay = st.session_state["money_kind"] == "pay"
     _m_owed = to_float(_mr["欠款金额"]) - to_float(_mr["已收金额"])
 
-    _rb1, _rb2 = st.columns([2, 2])
-    if _rb2.button("← 返回客户列表", key="money_back"):
+    _rb1, _rb2 = st.columns([3, 1])
+    if _rb2.button("← 返回客户列表", key="money_back", type="primary", use_container_width=True):
         st.session_state["page"] = "list"
         st.rerun()
 
     st.markdown(f"### {'💰 记一笔收款' if _is_pay else '➕ 记一笔欠款'}")
     st.markdown(f"**{_mn}**")
-    st.caption(f"当前：欠 ¥{to_float(_mr['欠款金额']):,.2f}　"
-               f"已收 ¥{to_float(_mr['已收金额']):,.2f}　未付 ¥{_m_owed:,.2f}")
+    st.markdown(
+        f"<div style='font-size:0.8rem;color:#888'>当前：欠 "
+        f"<b style='color:{CLR_OWED}'>¥{to_float(_mr['欠款金额']):,.2f}</b>　已收 "
+        f"<b style='color:{CLR_PAID}'>¥{to_float(_mr['已收金额']):,.2f}</b>　未付 "
+        f"<b style='color:{CLR_OWED}'>{_m_owed:,.2f}</b></div>",
+        unsafe_allow_html=True)
+    if not _is_pay:
+        st.caption("记完这笔，这位客户的「未回款天数」从今天重新开始数 ✓")
 
     with st.form("money_form"):
         _mv = st.number_input("这次收了多少？" if _is_pay else "这次又欠了多少？",
@@ -946,8 +1004,11 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
                 _msg = f"✅ 「{_mn}」已收 ¥{_mv:,.2f}"
             else:
                 _new.loc[_mid, "欠款金额"] = to_float(_mr["欠款金额"]) + _mv
+                # 记了新的欠款 → 这位客户的「欠款日期」改成操作当天，
+                # 卡片上的「未回款天数」就从今天重新开始数（你定的规矩）
+                _new.loc[_mid, "欠款日期"] = pd.Timestamp(date.today())
                 _new.loc[_mid, LOG_COL] = add_log(_mr, "欠", _mv)
-                _msg = f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}"
+                _msg = f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}（天数从今天重新数）"
             update_ledger(_new, _msg, force_reload=True)
             # 回到这家客户的详情页（列表会按欠款重排，客户会"跑掉"，详情页不会）
             st.session_state["page"] = "detail"
@@ -981,8 +1042,8 @@ if st.session_state["page"] == "del" and st.session_state["current_id"] in ledge
     _did = st.session_state["current_id"]
     _dn = str(ledger.loc[_did, "客户名称"])
 
-    _rb1, _rb2 = st.columns([2, 2])
-    if _rb2.button("← 返回客户列表", key="delpage_back"):
+    _rb1, _rb2 = st.columns([3, 1])
+    if _rb2.button("← 返回客户列表", key="delpage_back", type="primary", use_container_width=True):
         st.session_state["page"] = "list"
         st.rerun()
 
@@ -1015,8 +1076,9 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
 
     # 刚进这个页面时，自动滚到最上面（页面内点按钮不会再滚，不打扰操作）
 
-    _rb1, _rb2 = st.columns([2, 2])
-    if _rb2.button("← 返回客户列表"):
+    _rb1, _rb2 = st.columns([3, 1])
+    if _rb2.button("← 返回客户列表", key="detail_back", type="primary",
+                    use_container_width=True):
         st.session_state["page"] = "list"
         st.session_state["editing_id"] = -1
         st.session_state["del_pending"] = -1
@@ -1172,11 +1234,11 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
 if st.session_state["page"] == "stats":
     _y = date.today().year
     _ynow = str(_y)
-    _rb1, _rb2 = st.columns([2, 2])
-    if _rb2.button("← 返回客户列表", key="stats_back"):
+    _rb1, _rb2 = st.columns([3, 1])
+    if _rb2.button("← 返回客户列表", key="stats_back", type="primary", use_container_width=True):
         st.session_state["page"] = "list"
         st.rerun()
-    st.markdown(f"### 📈 {_y} 年收款 / 欠款统计")
+    st.markdown(f"### 📈 {_y} 年回款统计")
 
     # ---- 把每位客户的流水按月归堆（老数据没流水的，用欠款日期+金额补一条）----
     _m_paid_all = [0.0] * 12
@@ -1209,12 +1271,13 @@ if st.session_state["page"] == "stats":
                               "欠款": _m_owed_all})
     _long2 = _chart_df.melt(id_vars="月份", value_vars=["欠款", "收款"],
                             var_name="类型", value_name="金额")
+    _long2["类型"] = _long2["类型"].replace({"收款": "已回款", "欠款": "待回款"})
     _in_year = sum(_m_paid_all)
     _ow_year = sum(_m_owed_all)
     _mo_now = date.today().month
 
     if _in_year <= 0 and _ow_year <= 0:
-        st.info("📭 今年还没有收款/欠款记录。\n\n"
+        st.info("📭 今年还没有已回款/待回款记录。\n\n"
                 "在客户卡片上点「💰 收钱」或「➕ 欠款」记下第一笔，"
                 "这里就会出现逐月的柱子 ✓")
     else:
@@ -1233,7 +1296,7 @@ if st.session_state["page"] == "stats":
                             scale=alt.Scale(domain=[0, _xmax2]),
                             axis=alt.Axis(labelFontSize=10, format=",.0f")),
                     color=alt.Color("类型:N", title=None,
-                                    scale=alt.Scale(domain=["欠款", "收款"],
+                                    scale=alt.Scale(domain=["待回款", "已回款"],
                                                     range=["#E4572E", "#2E8B57"]),
                                     legend=alt.Legend(orient="top",
                                                       labelFontSize=12)),
@@ -1255,11 +1318,18 @@ if st.session_state["page"] == "stats":
             st.altair_chart((_bars2 + _txt2).properties(width="container",
                                                         height=380))
 
-    st.markdown(f"**{_y} 年欠款合计：¥{_ow_year:,.2f}**")
-    st.markdown(f"**{_y} 年收款合计：¥{_in_year:,.2f}**")
-    st.markdown(f"本月（{_mo_now}月）欠款 ¥{_m_owed_all[_mo_now - 1]:,.2f}"
-                f"　｜　收款 ¥{_m_paid_all[_mo_now - 1]:,.2f}")
-    st.caption("红柱=那个月新增欠款 ✓ 绿柱=那个月收款 ✓ 点柱子看具体数字 ✓")
+    st.markdown(f"<div><b>{_y} 年已回款合计：</b>"
+                f"<b style='color:{CLR_PAID};font-size:1.1rem'>¥{_in_year:,.2f}</b></div>",
+                unsafe_allow_html=True)
+    # 本月：待回款 / 已回款 两行对齐（标签用等宽占位，金额就落在同一条竖线上）
+    st.markdown(
+        f"<div style='line-height:1.9'>本月（{_mo_now}月）<br>"
+        f"<span style='display:inline-block;min-width:4.2em'>待回款</span>"
+        f"<b style='color:{CLR_OWED}'>¥{_m_owed_all[_mo_now - 1]:,.2f}</b><br>"
+        f"<span style='display:inline-block;min-width:4.2em'>已回款</span>"
+        f"<b style='color:{CLR_PAID}'>¥{_m_paid_all[_mo_now - 1]:,.2f}</b></div>",
+        unsafe_allow_html=True)
+    st.caption("红柱=那个月新增待回款 ✓ 绿柱=那个月已回款 ✓ 点柱子看具体数字 ✓")
     st.markdown('<a href="#top" style="font-size:0.85rem">⬆️ 回到顶部</a>',
                 unsafe_allow_html=True)
     st.stop()
@@ -1273,8 +1343,9 @@ if st.session_state["page"] == "customer" and st.session_state["current_id"] in 
     _cn = str(_cr["客户名称"])
 
 
-    _rb1, _rb2 = st.columns([2, 2])
-    if _rb2.button("← 返回客户列表"):
+    _rb1, _rb2 = st.columns([3, 1])
+    if _rb2.button("← 返回客户列表", key="cust_back", type="primary",
+                    use_container_width=True):
         st.session_state["page"] = "list"
         st.rerun()
 
@@ -1353,8 +1424,12 @@ if st.session_state["page"] == "customer" and st.session_state["current_id"] in 
         st.altair_chart((_bars + _txt).properties(width="container", height=380))
 
     # 只留两行：全年收款 + 当前未付
-    st.markdown(f"📅 **{_ty} 年收款：¥{sum(_m_paid):,.2f}**")
-    st.markdown(f"当前未付：**¥{_owed_c:,.2f}**")
+    st.markdown(f"📅 **{_ty} 年收款：**"
+                f"<b style='color:{CLR_PAID}'>¥{sum(_m_paid):,.2f}</b>",
+                unsafe_allow_html=True)
+    st.markdown(f"当前未付："
+                f"<b style='color:{CLR_OWED};font-size:1.1rem'>¥{_owed_c:,.2f}</b>",
+                unsafe_allow_html=True)
     if _other_year:
         st.caption(f"（另有 {_other_year} 笔往年的记录，没算进今年的图里）")
 
@@ -1367,16 +1442,40 @@ if st.session_state["page"] == "customer" and st.session_state["current_id"] in 
                 unsafe_allow_html=True)
     st.stop()
 
+# =====================================================================
+# 选择显示格式（点主页的「🗂️ 格式」进来；选完自动回首页）
+# =====================================================================
+if st.session_state["page"] == "fmt":
+    _rb1, _rb2 = st.columns([3, 1], vertical_alignment="center")
+    _rb1.markdown("### 🗂️ 选择显示格式")
+    if _rb2.button("← 返回", key="fmt_back", type="primary",
+                   use_container_width=True):
+        st.session_state["page"] = "list"
+        st.rerun()
+
+    _fm = st.radio("格式", ["🗂️ 卡片式", "📋 表格"],
+                   index=0 if st.session_state["view_mode"] == "🗂️ 卡片式" else 1,
+                   key="fmt_pick", label_visibility="collapsed")
+    st.caption("选好会自动回到首页 ✓")
+    if _fm != st.session_state["view_mode"]:
+        st.session_state["view_mode"] = _fm
+        st.session_state["page"] = "list"
+        st.rerun()
+    st.stop()
+
 # 回到主页了 —— 把"自动置顶"的标记清掉，下次再进子页面还会滚到最上面
 st.session_state["scroll_mark"] = "list"
 
 # =====================================================================
 # 主页：总欠款 → 搜索 → 添加 → 客户列表（卡片 / 表格） → 图表
 # =====================================================================
-# 顶行：未付（客户还欠多少，实时）+ 笔数（一个客户算一笔）
-_head1 = (f"📅 **{date.today().year}年**　"
-          f"应收款 **{money_short(data['未付金额'].sum())}**"
-          f"（{len(data)} 笔）")
+# 顶行：未付（客户还欠多少，实时）+ 还欠着钱的客户数
+# ⚠️ 只数「未付 > 0」的客户，已结清的不算进去（跟 v128 那版一致）
+_unpaid_rows = data[data["未付金额"] > 0] if not data.empty else data
+_head1 = (f"📅 <b>{date.today().year}年</b>　"
+          f"待回款 <b style='color:{CLR_OWED};font-size:1.15rem'>"
+          f"{money_short(_unpaid_rows['未付金额'].sum())}</b>"
+          f"（{len(_unpaid_rows)} 家）")
 
 # ---------- 客户统计（纯本地计算，不额外联网，不占流量） ----------
 _this_year = date.today().year
@@ -1400,33 +1499,47 @@ if not _paid_year.empty:
     _by_month_txt = "　｜　".join(_parts) if _parts else "暂无记录"
 
 # 第一行：年份 + 欠款；第二行：月收 + 年收（分开两行，手机上不挤）
-st.markdown(_head1)
-_s1, _s2 = st.columns([2.45, 1], vertical_alignment="center")
-_s1.markdown(
-    f"<div style='font-size:0.8rem;line-height:1.5'>月收 <b>¥{_month_in:,.2f}</b>"
-    f"　年收 <b>¥{_money_in:,.2f}</b></div>",
-    unsafe_allow_html=True)
-if _s2.button("📈 统计", key="go_stats"):
-    st.session_state["page"] = "stats"
-    st.rerun()
-# 只有真的有收款记录时，才多显示一行"各月收款"（平时不占地方）
-if _by_month_txt != "暂无记录":
-    st.caption(f"📊 各月收款：{_by_month_txt}")
+st.markdown(f"<div style='font-size:1.1rem;line-height:1.5'>{_head1}</div>",
+            unsafe_allow_html=True)
+with st.container(border=True, key="top_card", gap=6):
+    # 月回款：单独一行（右边留空）
+    st.markdown(f"<div style='font-size:0.85rem;line-height:1.6'>月回款 "
+                f"<b style='color:{CLR_PAID};font-size:1rem'>¥{_month_in:,.2f}</b></div>",
+                unsafe_allow_html=True)
+    # 年回款 + 格式 / 统计（格式、统计比原来往下挪了一行）
+    _s1, _s2, _s3 = st.columns([1.8, 1, 1], gap=6, vertical_alignment="center")
+    _s1.markdown(f"<div style='font-size:0.85rem;line-height:1.6'>年回款 "
+                 f"<b style='color:{CLR_PAID};font-size:1rem'>¥{_money_in:,.2f}</b></div>",
+                 unsafe_allow_html=True)
+    if _s2.button("🗂️ 格式", key="go_fmt", use_container_width=True):
+        st.session_state["page"] = "fmt"
+        st.rerun()
+    if _s3.button("📈 统计", key="go_stats", use_container_width=True):
+        st.session_state["page"] = "stats"
+        st.rerun()
 
-# 添加完客户 / 存完照片后，需要清空或改写搜索框（必须在控件创建之前做）
-if st.session_state["pending_search"]:
-    st.session_state["search_box"] = st.session_state["pending_search"]
-    st.session_state["pending_search"] = ""
-if st.session_state["clear_search"]:
-    st.session_state["search_box"] = ""
-    st.session_state["clear_search"] = False
+    # 添加完客户 / 存完照片后，需要清空或改写搜索框（必须在控件创建之前做）
+    if st.session_state["pending_search"]:
+        st.session_state["search_box"] = st.session_state["pending_search"]
+        st.session_state["pending_search"] = ""
+    if st.session_state["clear_search"]:
+        st.session_state["search_box"] = ""
+        st.session_state["clear_search"] = False
 
-c_search, c_go, c_add = st.columns([3, 1.4, 1.8], vertical_alignment="bottom")
-keyword = c_search.text_input("搜索", placeholder="", key="search_box",
-                              label_visibility="collapsed")
-c_go.button("确定", type="primary")
-if c_add.button("➕ 添加", type="primary"):
-    st.session_state["show_add"] = not st.session_state["show_add"]
+    # 搜索栏标识 + 搜索行：套一个 gap=0 的容器，标识才能真正贴着输入框
+    with st.container(gap=0, key="search_row"):
+        st.caption("🔍 客户搜索栏")
+        # 用跟上面完全一样的列宽 [1.8, 1, 1]，
+        # 所以四个键大小一模一样、上下严格对齐
+        _b1, _b2, _b3 = st.columns([1.8, 1, 1], gap=6,
+                                   vertical_alignment="center")
+        keyword = _b1.text_input("搜索", placeholder="", key="search_box",
+                                 label_visibility="collapsed")
+        _b2.button("确定", type="primary", key="btn_search",
+                   use_container_width=True)
+        if _b3.button("➕ 新建", type="primary", key="btn_add",
+                      use_container_width=True):
+            st.session_state["show_add"] = not st.session_state["show_add"]
 kw = keyword.strip()
 
 # 搜过客户之后，给一个"清空"按钮 —— 手机上不用去手动删输入框里的字
@@ -1468,8 +1581,7 @@ if st.session_state["show_add"]:
             st.rerun()
 
 # ---------- 明细：卡片式 / 表格 ----------
-mode = st.radio("显示方式", ["🗂️ 卡片式", "📋 表格"], horizontal=True,
-                key="view_mode", label_visibility="collapsed")
+mode = st.session_state.get("view_mode", "🗂️ 卡片式")
 
 if kw:
     filtered = data[data["客户名称"].str.contains(kw, case=False, na=False)
@@ -1512,11 +1624,18 @@ if mode == "🗂️ 卡片式":
         for rid, row in page_rows.iterrows():
             cname = str(row["客户名称"])
             unpaid = to_float(row["欠款金额"]) - to_float(row["已收金额"])
-            days = days_text(with_unpaid(pd.DataFrame([row])).iloc[0])
-            badge = days_badge(with_unpaid(pd.DataFrame([row])).iloc[0])
+            _wrow = with_unpaid(pd.DataFrame([row])).iloc[0]
+            days = days_text(_wrow)
+            badge = days_badge(_wrow)
+            _col = days_color(_wrow)          # 这一家的颜色：绿/黄/橙/红/灰
             n_photos = len(split_photos(row["照片"]))
 
             with st.container(border=True):
+                # 卡片顶一条颜色：一眼看出这家拖了多久（绿→黄→橙→红，结清=灰）
+                st.markdown(
+                    f"<div style='height:4px;border-radius:3px;background:{_col};"
+                    f"margin:-0.3rem 0 0.1rem 0'></div>",
+                    unsafe_allow_html=True)
                 _n1, _n2 = st.columns([5, 1], vertical_alignment="center")
                 _title = f"{badge} {cname}　⏰ {days}"
                 _clicked = _n1.button(_title, key=f"open_cust_{rid}_{cname}")
@@ -1528,8 +1647,12 @@ if mode == "🗂️ 卡片式":
                     st.session_state["page"] = "del"
                     st.session_state["current_id"] = rid
                     st.rerun()
-                st.markdown(f"未付 **¥{unpaid:,.2f}**"
-                            + (f"　｜　📷 {n_photos} 张" if n_photos else ""))
+                st.markdown(
+                    f"<div>未付 <b style='color:{_col};font-size:1.1rem'>"
+                    f"¥{unpaid:,.2f}</b>"
+                    + (f"　｜　📷 {n_photos} 张" if n_photos else "")
+                    + "</div>",
+                    unsafe_allow_html=True)
                 b1, b2, b3 = st.columns(3)
                 if b1.button("💰 收钱", key=f"pay_{rid}_{cname}"):
                     st.session_state["page"] = "money"
@@ -1591,11 +1714,14 @@ else:
 
 # ---------- 翻页按钮放在列表下面（看完这一页顺手翻） ----------
 if _pages > 1:
-    _p1, _p2 = st.columns(2)
-    if _p1.button("◀ 上一页", disabled=_page <= 1):
+    _p1, _p2, _p3 = st.columns(3)
+    if _p1.button("◀ 上一页", disabled=_page <= 1, use_container_width=True):
         st.session_state["page_no"] = _page - 1
         st.rerun()
-    if _p2.button("下一页 ▶", disabled=_page >= _pages):
+    if _p2.button("⏮ 第 1 页", disabled=_page <= 1, use_container_width=True):
+        st.session_state["page_no"] = 1
+        st.rerun()
+    if _p3.button("下一页 ▶", disabled=_page >= _pages, use_container_width=True):
         st.session_state["page_no"] = _page + 1
         st.rerun()
 
