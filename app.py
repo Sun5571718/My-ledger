@@ -304,6 +304,29 @@ def to_float(x) -> float:
         return 0.0
 
 
+def safe_calc(text) -> float:
+    """把 "500+300" 这种算式算出来（只允许数字和 + - * / ( ) . 空格，安全）。
+    × ÷ ＋ － 这些全角/中文符号会自动换成 * / + -。
+    看不懂（含字母、负数结果）就返回 0，让界面提示"金额没看懂"。"""
+    s = str(text or "").strip()
+    s = s.replace("×", "*").replace("÷", "/").replace("，", "").replace(",", "")
+    s = s.replace("＋", "+").replace("－", "-").replace("　", "").replace(" ", "")
+    if not s:
+        return 0.0
+    if len(s) > 60 or not re.fullmatch(r"[0-9+\-*/().]+", s):
+        return 0.0
+    try:
+        v = float(eval(s, {"__builtins__": {}}, {}))
+    except Exception:
+        return 0.0
+    return v if v > 0 else 0.0
+
+
+def has_operator(text) -> bool:
+    """用户是不是输了算式（用来决定要不要把原式一起显示出来）"""
+    return any(c in str(text or "") for c in "+-*/×÷()")
+
+
 def unpaid_days(when) -> float:
     if pd.isna(when):
         return float("nan")
@@ -853,7 +876,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v110")
+st.caption("版本 v112")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -985,30 +1008,43 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
     if not _is_pay:
         st.caption("记完这笔，这位客户的「未回款天数」从今天重新开始数 ✓")
 
+    # 上次记完账 → 把金额框清空（不然下次进来还留着上次的数，容易重复记）
+    if st.session_state.pop("_clear_money_amt", False):
+        st.session_state["money_amt"] = ""
+
     with st.form("money_form"):
-        _mv = st.number_input("这次收了多少？" if _is_pay else "这次又欠了多少？",
-                              min_value=0.0, step=100.0, format="%.2f", value=None)
+        _mv_txt = st.text_input("这次收了多少？" if _is_pay else "这次又欠了多少？",
+                                placeholder="可以直接写算式：500+300",
+                                key="money_amt")
+        st.caption("💡 金额框支持算式：写 `500+300` 会算成 800 ✓")
         _mc1, _mc2 = st.columns(2)
         _mok = _mc1.form_submit_button("✅ 确定", type="primary")
         _mno = _mc2.form_submit_button("取消")
 
+    # 把算式算出来（跟当年"记一笔"那套一模一样）
+    _mv = safe_calc(_mv_txt)
+
     if _mok:
-        if _mv is None or _mv <= 0:
-            st.warning("请填写金额")
+        if _mv <= 0:
+            st.warning("金额没看懂 ✗ 请输入数字，或者像 500+300 这样的算式 ✓")
         else:
             _new = ledger.copy()
+            # 输了算式的话，把原式也一起显示出来（例如"¥800.00（500+300）"）
+            _raw = str(_mv_txt).strip()
+            _show = f"（{_raw}）" if has_operator(_raw) else ""
             if _is_pay:
                 _new.loc[_mid, "已收金额"] = to_float(_mr["已收金额"]) + _mv
                 _new.loc[_mid, "最后收款时间"] = pd.Timestamp(date.today())
                 _new.loc[_mid, LOG_COL] = add_log(_mr, "收", _mv)
-                _msg = f"✅ 「{_mn}」已收 ¥{_mv:,.2f}"
+                _msg = f"✅ 「{_mn}」已收 ¥{_mv:,.2f}{_show}"
             else:
                 _new.loc[_mid, "欠款金额"] = to_float(_mr["欠款金额"]) + _mv
                 # 记了新的欠款 → 这位客户的「欠款日期」改成操作当天，
                 # 卡片上的「未回款天数」就从今天重新开始数（你定的规矩）
                 _new.loc[_mid, "欠款日期"] = pd.Timestamp(date.today())
                 _new.loc[_mid, LOG_COL] = add_log(_mr, "欠", _mv)
-                _msg = f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}（天数从今天重新数）"
+                _msg = f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}{_show}（天数从今天重新数）"
+            st.session_state["_clear_money_amt"] = True   # 下次进来把金额框清空
             update_ledger(_new, _msg, force_reload=True)
             # 回到这家客户的详情页（列表会按欠款重排，客户会"跑掉"，详情页不会）
             st.session_state["page"] = "detail"
@@ -1017,16 +1053,17 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
         st.session_state["page"] = "detail"
         st.rerun()
 
-    # 自动把光标放进金额输入框（键盘直接弹出来，省一次点击）
+    # 手机点金额框：弹数字键盘（框是文本，所以算式照样能打）+ 自动聚焦，省一次点击
     components.html(
         """<script>
         (function(){
           try {
             var d = window.parent.document;
-            var el = d.querySelector('section.main input[type="number"]')
-                  || d.querySelector('[data-testid="stMain"] input[type="number"]')
-                  || d.querySelector('input[type="number"]');
-            if (el) { el.focus(); }
+            var el = d.querySelector('.st-key-money_amt input');
+            if (!el) { return; }
+            el.setAttribute('inputmode', 'decimal');
+            el.setAttribute('enterkeyhint', 'done');
+            el.focus();
           } catch (e) {}
         })();
         </script>""",
@@ -1541,6 +1578,21 @@ with st.container(border=True, key="top_card", gap=6):
                       use_container_width=True):
             st.session_state["show_add"] = not st.session_state["show_add"]
 kw = keyword.strip()
+
+# 手机上：搜索框那颗键改成「搜索」，搜完自动把键盘收起来（不然键盘挡着看不清结果）
+# kw 为空 = 还没搜 / 刚清空 → 不收键盘，方便继续打字
+components.html(
+    """<script>
+    (function(){ try{
+      var d = window.parent.document;
+      var el = d.querySelector('.st-key-search_box input');
+      if (!el) { return; }
+      el.setAttribute('enterkeyhint', 'search');
+      if (__BLUR__) { el.blur(); }
+    }catch(e){} })();
+    </script>""".replace("__BLUR__", "true" if kw else "false"),
+    height=0,
+)
 
 # 搜过客户之后，给一个"清空"按钮 —— 手机上不用去手动删输入框里的字
 if kw:
