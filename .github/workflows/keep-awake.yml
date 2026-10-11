@@ -1,7 +1,8 @@
 name: keep-awake
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *"        # 保活：戳应用
+    - cron: "0 3 1,16 * *"        # 打卡：每月 1 号和 16 号
   workflow_dispatch:
 jobs:
   ping:
@@ -14,3 +15,20 @@ jobs:
           echo "HTTP $code   大小 $(wc -c < /tmp/out) 字节"
           test "$code" = "200" || { echo "❌ 没戳到应用"; exit 1; }
           echo "✅ 戳到了"
+
+  heartbeat:
+    # 每半个月往仓库留个脚印，防止定时任务被"仓库 60 天没活动"停掉
+    if: github.event.schedule == '0 3 1,16 * *'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 更新打卡.txt
+        run: |
+          date -u +"最后打卡：%Y-%m-%d %H:%M UTC" > 打卡.txt
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add 打卡.txt
+          git diff --staged --quiet || git commit -m "自动打卡（防止定时任务被停用）"
+          git push
