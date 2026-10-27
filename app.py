@@ -948,7 +948,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v116")
+st.caption("版本 v117")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1088,18 +1088,15 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
         st.session_state["money_amt"] = ""
         st.session_state["debt_memo"] = ""
 
-    # ---- 欠款内容：先填这一句，再填金额（收款页没有这一步）----
+    # ---- 欠款页：内容框 + 金额框放在同一个表单里，填完一次「确定」就保存 ----
+    # （原来是"内容→确定→跳金额"，但浏览器不允许网页脚本抢光标，
+    #   所以改成两个框挨着放：填完内容直接往下点金额框，少一次跳转、也不容易卡住）
     _memo = ""
-    if not _is_pay:
-        _mm1, _mm2 = st.columns([3, 1], gap=6, vertical_alignment="bottom")
-        _memo = _mm1.text_input("这笔欠款是什么内容？",
-                                placeholder="例如：进了 20 箱矿泉水（可以空着）",
-                                key="debt_memo")
-        # 这个键只是"确认内容 → 把光标送到金额框"，真正的保存还是下面的「确定」
-        _mm2.button("✅ 确定", key="debt_memo_ok", type="primary",
-                    use_container_width=True)
-
     with st.form("money_form"):
+        if not _is_pay:
+            _memo = st.text_input("这笔欠款是什么内容？",
+                                  placeholder="例如：进了 20 箱矿泉水（可以空着）",
+                                  key="debt_memo")
         _mv_txt = st.text_input("这次收了多少？" if _is_pay else "这次又欠了多少？",
                                 placeholder="可以直接写算式：500+300",
                                 key="money_amt")
