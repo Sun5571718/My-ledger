@@ -948,7 +948,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v117")
+st.caption("版本 v119")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1132,8 +1132,8 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
                         f"（天数从今天重新数）")
             st.session_state["_clear_money_amt"] = True   # 下次进来把金额框清空
             update_ledger(_new, _msg, force_reload=True)
-            # 回到这家客户的详情页（列表会按欠款重排，客户会"跑掉"，详情页不会）
-            st.session_state["page"] = "detail"
+            # 记完账（不管是收款还是欠款）→ 都直接回首页，方便接着记下一家
+            st.session_state["page"] = "list"
             st.rerun()
     if _mno:
         st.session_state["page"] = "detail"
