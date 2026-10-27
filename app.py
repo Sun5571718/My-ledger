@@ -272,10 +272,85 @@ def read_csv_bytes(raw: bytes) -> pd.DataFrame | None:
     return None
 
 
+def flow_to_ledger(df: pd.DataFrame) -> pd.DataFrame:
+    """把「一行一笔」的往来明细表还原成客户表。
+       注意：这种表里没有照片和备注，导回来这两项会是空的。"""
+    rows = []
+    _g_name = df["客户"].astype(str).str.strip()
+    for name, g in df.groupby(_g_name, sort=False):
+        if not str(name).strip():
+            continue
+        g = g.copy()
+        g["_amt"] = pd.to_numeric(g["金额"], errors="coerce").fillna(0.0)
+        g["_kind"] = g["类型"].astype(str)
+        g["_date"] = pd.to_datetime(g["日期"], errors="coerce")
+        logs = []
+        for _, _r in g.sort_values("_date").iterrows():
+            _m = ""
+            if "内容" in g.columns:
+                _m = str(_r.get("内容") or "").strip()
+                if _m.lower() == "nan":
+                    _m = ""
+            logs.append({"d": ("" if pd.isna(_r["_date"]) else str(_r["_date"].date())),
+                         "t": ("收" if "收" in _r["_kind"] else "欠"),
+                         "v": round(float(_r["_amt"]), 2),
+                         **({"m": _m} if _m else {})})
+        owed_s = g.loc[g["_kind"].str.contains("欠"), "_amt"]
+        paid_s = g.loc[g["_kind"].str.contains("收"), "_amt"]
+        d_owed = g.loc[g["_kind"].str.contains("欠"), "_date"].max()
+        d_paid = g.loc[g["_kind"].str.contains("收"), "_date"].max()
+        rows.append({
+            "客户名称": str(name).strip(),
+            "欠款金额": round(float(owed_s.sum()), 2),
+            "已收金额": round(float(paid_s.sum()), 2),
+            "欠款日期": d_owed if pd.notna(d_owed) else pd.NaT,
+            "最后收款时间": d_paid if pd.notna(d_paid) else pd.NaT,
+            "备注": "（由往来明细导回）",
+            LOG_COL: dump_log(logs),
+            "照片": "",
+        })
+    return normalize(pd.DataFrame(rows))
+
+
+def read_any_csv_bytes(raw: bytes) -> pd.DataFrame | None:
+    """读导入的 CSV：两种格式都认 ——
+       ① 「客户表」（一行一家）→ 原样导入（含照片、备注、明细）
+       ② 「往来明细表」（一行一笔）→ 按客户汇总还原成客户表（照片/备注会没有）"""
+    df = None
+    for enc in ("utf-8-sig", "gbk", "utf-8"):
+        try:
+            df = pd.read_csv(io.BytesIO(raw), encoding=enc)
+            break
+        except Exception:
+            continue
+    if df is None or len(df) == 0:
+        return None
+    cols = {str(c).strip() for c in df.columns}
+    if {"客户", "类型", "金额"} <= cols:          # 一行一笔的明细表
+        return flow_to_ledger(df)
+    out = normalize(df)                            # 正常客户表
+    if len(out) == 0:
+        return None
+    out[ID_COL] = 0
+    return out
+
+
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     out = with_unpaid(df)[FIELDS + ["未付金额"]].copy()
     for col in DATE_FIELDS:
         out[col] = pd.to_datetime(out[col], errors="coerce").dt.strftime("%Y-%m-%d")
+    # 多导一列"人看的往来明细"（一行一家也能看出每笔的时间和内容）
+    def _flow_text(row):
+        items = logs_with_seed(row)
+        parts = []
+        for it in sorted(items, key=_log_date_key, reverse=True):
+            _d = str(it.get("d", "")).strip()
+            _t = "收" if str(it.get("t")) == "收" else "欠"
+            _v = float(it.get("v", 0) or 0)
+            _m = str(it.get("m", "") or "").strip()
+            parts.append(f"{_d} {_t}{_v:,.2f}" + (f"（{_m}）" if _m else ""))
+        return "；".join(parts)
+    out["往来明细"] = df.apply(_flow_text, axis=1)
     # 云端模式：多导出一列"照片链接" —— 以后翻备份，点链接就能看到当时的照片
     if USE_CLOUD and "照片" in out.columns:
         def _links(raw):
@@ -286,6 +361,30 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
                     urls.append(str(_u))
             return "  ".join(urls)
         out["照片链接"] = out["照片"].apply(_links)
+    return out.to_csv(index=False).encode("utf-8-sig")
+
+
+def to_flow_csv_bytes(df: pd.DataFrame) -> bytes:
+    """把每位客户的往来流水拆成一张「一行一笔」的平表：
+       日期 / 客户 / 类型 / 金额 / 内容 / 备注
+       导出来能直接在 Excel 里排序、筛选、汇总（内容也在里面 ✓）"""
+    rows = []
+    for _, _r in df.iterrows():
+        for _it in logs_with_seed(_r):
+            rows.append({
+                "日期": str(_it.get("d", "")),
+                "客户": str(_r["客户名称"]),
+                "类型": "收款" if str(_it.get("t")) == "收" else "欠款",
+                "金额": round(float(_it.get("v", 0) or 0), 2),
+                "内容": str(_it.get("m", "") or "").strip(),
+                "备注": "老数据（历史记录）" if _it.get("old") else "",
+            })
+    if not rows:
+        return "日期,客户,类型,金额,内容,备注\n".encode("utf-8-sig")
+    out = pd.DataFrame(rows)
+    out["日期"] = (pd.to_datetime(out["日期"], errors="coerce")
+                   .dt.strftime("%Y-%m-%d").fillna(""))
+    out = out.sort_values(["日期", "客户"], ascending=[False, True])
     return out.to_csv(index=False).encode("utf-8-sig")
 
 
@@ -771,17 +870,21 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**📥 导入 CSV**")
+    st.caption("两种导出的文件都能直接导回来 ✓\n\n"
+               "· 客户表（一行一家）：照片、备注、明细全恢复 ✓\n"
+               "· 往来明细（一行一笔）：按客户自动汇总还原（照片/备注没有）")
     up_file = st.file_uploader("选择 CSV 文件", type=["csv"], key="import_uploader")
     mode = st.radio("导入方式", ["追加到现有数据", "覆盖全部数据"], key="import_mode")
     if st.button("开始导入"):
         if up_file is None:
             st.warning("请先选择一个 CSV 文件")
         else:
-            df_new = read_csv_bytes(up_file.getvalue())
+            df_new = read_any_csv_bytes(up_file.getvalue())
             if df_new is None:
                 st.error("读取失败：请确认是 CSV 文件（推荐 UTF-8 编码）")
             elif df_new.empty:
-                st.warning("文件里没有有效数据（必须包含「客户名称」列）")
+                st.warning("文件里没有有效数据（需要「客户名称」列，"
+                           "或者是「客户/类型/金额」的往来明细表）")
             else:
                 if mode == "追加到现有数据":
                     df_new = pd.concat([st.session_state["ledger"], df_new], ignore_index=True)
@@ -796,7 +899,23 @@ with st.sidebar:
         file_name=f"欠款台账_{date.today().strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
-    st.caption("编码 UTF-8-BOM，Excel 不乱码。照片在云端，不在 CSV 里。")
+    st.caption("编码 UTF-8-BOM，Excel / WPS 双击就能看，中文不乱码 ✓\n\n"
+               "`客户位置` 是程序读的原始格式（导入要用它，别删）；"
+               "`往来明细` 是给人看的一列 ✓")
+    st.success("✅ 这个文件**可以导回来**（下面「📥 导入 CSV」→ 覆盖全部数据）✓")
+
+    st.markdown("**📋 导出往来明细（一行一笔）**")
+    _flow = to_flow_csv_bytes(st.session_state["ledger"])
+    _n_flow = max(0, _flow.count(b"\n") - 1)
+    st.download_button(
+        f"下载往来明细（共 {_n_flow} 笔）",
+        data=_flow,
+        file_name=f"往来明细_{date.today().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+    )
+    st.caption("一行一笔：日期、客户、类型（收款/欠款）、金额、内容 ✓ "
+               "Excel 打开就能排序、筛选、按客户汇总 ✓")
+    st.success("✅ 这个文件**也能导回来**（会自动按客户汇总；照片/备注没有）✓")
 
     st.divider()
     st.markdown("**📦 完整备份（数据表 + 照片）**")
@@ -876,7 +995,7 @@ with st.sidebar:
                     if not _main:
                         st.error("备份包里没找到数据表（.csv）")
                     else:
-                        _rdf = read_csv_bytes(_zf.read(_main[0]))
+                        _rdf = read_any_csv_bytes(_zf.read(_main[0]))
                         if _rdf is None or _rdf.empty:
                             st.error("备份包里的数据表读不出来（或没有有效数据）")
                         else:
@@ -948,7 +1067,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v119")
+st.caption("版本 v121")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
