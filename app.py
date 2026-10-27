@@ -362,11 +362,15 @@ def dump_log(items: list) -> str:
     return json.dumps(items, ensure_ascii=False) if items else ""
 
 
-def add_log(row, kind: str, amount: float, when=None) -> str:
-    """往流水里加一条：kind 是「欠」或「收」"""
+def add_log(row, kind: str, amount: float, when=None, memo: str = "") -> str:
+    """往流水里加一条：kind 是「欠」或「收」，memo 是这笔的内容/说明（可以空）"""
     items = load_log(row)
-    items.append({"d": str(when if when is not None else date.today()),
-                  "t": kind, "v": round(float(amount), 2)})
+    _one = {"d": str(when if when is not None else date.today()),
+            "t": kind, "v": round(float(amount), 2)}
+    _memo = str(memo or "").strip()
+    if _memo:
+        _one["m"] = _memo          # 只有填了内容才存，老流水不带这个键
+    items.append(_one)
     return dump_log(items)
 
 
@@ -409,13 +413,17 @@ def render_recent_logs(row, n: int = 5, extra: str = "") -> None:
     if not items:
         st.caption("还没有往来记录 ✓ 记这一笔之后就会出现在这里")
         return
-    _rows = ["| 日期 | 类型 | 金额 |", "|:--|:--|--:|"]
+    _rows = ["| 日期 | 类型 | 金额 | 内容 |", "|:--|:--|--:|:--|"]
     for _it in items:
         _d = str(_it.get("d", "")).strip() or "—"
         _t = "💰 收款" if str(_it.get("t")) == "收" else "➕ 欠款"
         _v = float(_it.get("v", 0) or 0)
         _h = "＊" if _it.get("old") else ""
-        _rows.append(f"| {_d}{_h} | {_t} | ¥{_v:,.2f} |")
+        # 内容太长会把手机上的表格挤爆，超过 12 个字就截断
+        _m = str(_it.get("m", "") or "").strip().replace("|", "｜")
+        if len(_m) > 12:
+            _m = _m[:12] + "…"
+        _rows.append(f"| {_d}{_h} | {_t} | ¥{_v:,.2f} | {_m} |")
     st.markdown("\n".join(_rows))
     if total > n:
         st.caption(f"只列最新 {n} 笔，更早的看上方的柱状图/合计 ✓")
@@ -940,7 +948,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v114")
+st.caption("版本 v116")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1075,9 +1083,21 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
     if not _is_pay:
         st.caption("记完这笔，这位客户的「未回款天数」从今天重新开始数 ✓")
 
-    # 上次记完账 → 把金额框清空（不然下次进来还留着上次的数，容易重复记）
+    # 上次记完账 → 把两个框都清空（不然下次进来还留着上次的内容，容易重复记）
     if st.session_state.pop("_clear_money_amt", False):
         st.session_state["money_amt"] = ""
+        st.session_state["debt_memo"] = ""
+
+    # ---- 欠款内容：先填这一句，再填金额（收款页没有这一步）----
+    _memo = ""
+    if not _is_pay:
+        _mm1, _mm2 = st.columns([3, 1], gap=6, vertical_alignment="bottom")
+        _memo = _mm1.text_input("这笔欠款是什么内容？",
+                                placeholder="例如：进了 20 箱矿泉水（可以空着）",
+                                key="debt_memo")
+        # 这个键只是"确认内容 → 把光标送到金额框"，真正的保存还是下面的「确定」
+        _mm2.button("✅ 确定", key="debt_memo_ok", type="primary",
+                    use_container_width=True)
 
     with st.form("money_form"):
         _mv_txt = st.text_input("这次收了多少？" if _is_pay else "这次又欠了多少？",
@@ -1109,8 +1129,10 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
                 # 记了新的欠款 → 这位客户的「欠款日期」改成操作当天，
                 # 卡片上的「未回款天数」就从今天重新开始数（你定的规矩）
                 _new.loc[_mid, "欠款日期"] = pd.Timestamp(date.today())
-                _new.loc[_mid, LOG_COL] = add_log(_mr, "欠", _mv)
-                _msg = f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}{_show}（天数从今天重新数）"
+                _new.loc[_mid, LOG_COL] = add_log(_mr, "欠", _mv, memo=_memo)
+                _memo_show = f"　「{_memo.strip()}」" if _memo.strip() else ""
+                _msg = (f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}{_show}{_memo_show}"
+                        f"（天数从今天重新数）")
             st.session_state["_clear_money_amt"] = True   # 下次进来把金额框清空
             update_ledger(_new, _msg, force_reload=True)
             # 回到这家客户的详情页（列表会按欠款重排，客户会"跑掉"，详情页不会）
@@ -1124,18 +1146,40 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
     st.divider()
     render_recent_logs(_mr, 5)
 
-    # 手机点金额框：弹数字键盘（框是文本，所以算式照样能打）+ 自动聚焦，省一次点击
+    # 手机上：自动把光标放对位置 ——
+    #   欠款页：内容还没填 → 光标停在「内容」框（键盘上的回车/前进键就是"确定"）
+    #           内容填好了 → 自动跳到「金额」框
+    #   收款页：直接放金额框
+    # 找输入框用"占位文字"来认（比 Streamlit 的类名可靠），并且多试两次防页面还没画完
     components.html(
         """<script>
         (function(){
-          try {
-            var d = window.parent.document;
-            var el = d.querySelector('.st-key-money_amt input');
-            if (!el) { return; }
-            el.setAttribute('inputmode', 'decimal');
-            el.setAttribute('enterkeyhint', 'done');
-            el.focus();
-          } catch (e) {}
+          function boot(){
+            try {
+              var d = window.parent.document;
+              function findInput(prefix){
+                var all = d.querySelectorAll('input, textarea');
+                for (var i = 0; i < all.length; i++){
+                  var p = all[i].getAttribute('placeholder') || '';
+                  if (p.indexOf(prefix) === 0) { return all[i]; }
+                }
+                return null;
+              }
+              var amt  = findInput('可以直接写算式');
+              var memo = findInput('例如：进了');
+              if (memo) { memo.setAttribute('enterkeyhint', 'go'); }
+              if (amt)  { amt.setAttribute('inputmode', 'decimal');
+                          amt.setAttribute('enterkeyhint', 'done'); }
+              if (memo && !String(memo.value || '').trim()) {
+                if (d.activeElement !== memo) { memo.focus(); }   // 内容还空着 → 停在这里
+                return;
+              }
+              if (amt && d.activeElement !== amt) { amt.focus(); }  // 内容有了 → 跳到金额框
+            } catch (e) {}
+          }
+          boot();
+          setTimeout(boot, 450);
+          setTimeout(boot, 1200);
         })();
         </script>""",
         height=0,
@@ -1657,13 +1701,18 @@ kw = keyword.strip()
 # kw 为空 = 还没搜 / 刚清空 → 不收键盘，方便继续打字
 components.html(
     """<script>
-    (function(){ try{
-      var d = window.parent.document;
-      var el = d.querySelector('.st-key-search_box input');
-      if (!el) { return; }
-      el.setAttribute('enterkeyhint', 'search');
-      if (__BLUR__) { el.blur(); }
-    }catch(e){} })();
+    (function(){
+      function boot(){ try{
+        var d = window.parent.document;
+        var el = d.querySelector('.st-key-search_box input');
+        if (!el) { return; }
+        el.setAttribute('enterkeyhint', 'search');
+        // 只有光标还停在这个框里才收键盘（防止把别处的焦点也抢走）
+        if (__BLUR__ && d.activeElement === el) { el.blur(); }
+      }catch(e){} }
+      boot();
+      setTimeout(boot, 450);
+    })();
     </script>""".replace("__BLUR__", "true" if kw else "false"),
     height=0,
 )
