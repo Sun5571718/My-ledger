@@ -370,6 +370,70 @@ def add_log(row, kind: str, amount: float, when=None) -> str:
     return dump_log(items)
 
 
+def logs_with_seed(row) -> list:
+    """取这位客户的往来流水。老数据没有逐笔流水的，就用欠款金额/已收金额补一条
+    「历史记录」（带 old=1 标记），这样页面上不会一片空白。"""
+    items = load_log(row)
+    if items:
+        return items
+    seed = []
+    if to_float(row["欠款金额"]) > 0:
+        _d0 = ("（没记日期）" if pd.isna(row["欠款日期"])
+               else str(pd.Timestamp(row["欠款日期"]).date()))
+        seed.append({"d": _d0, "t": "欠", "v": round(to_float(row["欠款金额"]), 2),
+                     "old": 1})
+    if to_float(row["已收金额"]) > 0:
+        _d1 = ("（没记日期）" if pd.isna(row["最后收款时间"])
+               else str(pd.Timestamp(row["最后收款时间"]).date()))
+        seed.append({"d": _d1, "t": "收", "v": round(to_float(row["已收金额"]), 2),
+                     "old": 1})
+    return seed
+
+
+def _log_date_key(it) -> str:
+    """排序用：不是 2026-01-01 这种格式的（比如"没记日期"）排到最后"""
+    _d = str(it.get("d", ""))
+    return _d if re.fullmatch(r"\d{4}-\d{2}-\d{2}", _d) else "0000-00-00"
+
+
+def recent_log_items(row, n: int = 5) -> tuple:
+    """最近 n 笔往来（按日期从新到旧）+ 总笔数"""
+    items = logs_with_seed(row)
+    return sorted(items, key=_log_date_key, reverse=True)[:n], len(items)
+
+
+def render_recent_logs(row, n: int = 5, extra: str = "") -> None:
+    """画「最近往来明细」表格（客户往来明细页 和 记账页 共用这一套）"""
+    items, total = recent_log_items(row, n)
+    st.markdown(f"**📋 最近往来明细**（最新 {n} 笔　·　共 {total} 笔）{extra}")
+    if not items:
+        st.caption("还没有往来记录 ✓ 记这一笔之后就会出现在这里")
+        return
+    _rows = ["| 日期 | 类型 | 金额 |", "|:--|:--|--:|"]
+    for _it in items:
+        _d = str(_it.get("d", "")).strip() or "—"
+        _t = "💰 收款" if str(_it.get("t")) == "收" else "➕ 欠款"
+        _v = float(_it.get("v", 0) or 0)
+        _h = "＊" if _it.get("old") else ""
+        _rows.append(f"| {_d}{_h} | {_t} | ¥{_v:,.2f} |")
+    st.markdown("\n".join(_rows))
+    if total > n:
+        st.caption(f"只列最新 {n} 笔，更早的看上方的柱状图/合计 ✓")
+    if any(_it.get("old") for _it in items):
+        st.caption("带 ＊ 的是老数据自动补的「历史记录」✓")
+
+
+def last_log_line(row) -> str:
+    """一句话说清"上次往来"是什么时候、多少钱（记账页顶部用）"""
+    items, _ = recent_log_items(row, 1)
+    if not items:
+        return "上次往来：还没有记录"
+    it = items[0]
+    kind = "收款" if str(it.get("t")) == "收" else "欠款"
+    return (f"上次往来：{str(it.get('d', '')).strip() or '日期不详'}　"
+            f"{kind} ¥{float(it.get('v', 0) or 0):,.2f}")
+
+
 def money_short(v) -> str:
     """手机上一眼能看懂的金额：1 万及以上用「万」（保留 1 位小数），1 万以下显示元。"""
     v = to_float(v)
@@ -876,7 +940,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v112")
+st.caption("版本 v114")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1005,6 +1069,9 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
         f"<b style='color:{CLR_PAID}'>¥{to_float(_mr['已收金额']):,.2f}</b>　未付 "
         f"<b style='color:{CLR_OWED}'>{_m_owed:,.2f}</b></div>",
         unsafe_allow_html=True)
+    # 一眼看到「上次往来」是什么时候、多少钱（记账时最需要这个）
+    st.markdown(f"<div style='font-size:0.85rem'>🕒 <b>{last_log_line(_mr)}</b></div>",
+                unsafe_allow_html=True)
     if not _is_pay:
         st.caption("记完这笔，这位客户的「未回款天数」从今天重新开始数 ✓")
 
@@ -1052,6 +1119,10 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
     if _mno:
         st.session_state["page"] = "detail"
         st.rerun()
+
+    # 这一家最近的收款/欠款明细（记完账也能马上核对）
+    st.divider()
+    render_recent_logs(_mr, 5)
 
     # 手机点金额框：弹数字键盘（框是文本，所以算式照样能打）+ 自动聚焦，省一次点击
     components.html(
@@ -1469,6 +1540,9 @@ if st.session_state["page"] == "customer" and st.session_state["current_id"] in 
                 unsafe_allow_html=True)
     if _other_year:
         st.caption(f"（另有 {_other_year} 笔往年的记录，没算进今年的图里）")
+
+    # ---- 最近往来明细：收款 / 欠款，带日期，只显示最新 5 笔 ----
+    render_recent_logs(_cr, 5)
 
     st.divider()
     if st.button("📷 拍照 / 修改资料", type="primary"):
