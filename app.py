@@ -462,10 +462,14 @@ def dump_log(items: list) -> str:
 
 
 def add_log(row, kind: str, amount: float, when=None, memo: str = "") -> str:
-    """往流水里加一条：kind 是「欠」或「收」，memo 是这笔的内容/说明（可以空）"""
+    """往流水里加一条：kind 是「欠」或「收」，memo 是这笔的内容/说明（可以空）
+       时间默认精确到分钟（手机上看得出是几点几分记的）"""
     items = load_log(row)
-    _one = {"d": str(when if when is not None else date.today()),
-            "t": kind, "v": round(float(amount), 2)}
+    if when is None:
+        _when = datetime.now().strftime("%Y-%m-%d %H:%M")
+    else:
+        _when = str(when)
+    _one = {"d": _when, "t": kind, "v": round(float(amount), 2)}
     _memo = str(memo or "").strip()
     if _memo:
         _one["m"] = _memo          # 只有填了内容才存，老流水不带这个键
@@ -494,9 +498,10 @@ def logs_with_seed(row) -> list:
 
 
 def _log_date_key(it) -> str:
-    """排序用：不是 2026-01-01 这种格式的（比如"没记日期"）排到最后"""
+    """排序用：不是 2026-01-01 这种开头的（比如"没记日期"）排到最后
+       （带时间的 2026-01-01 09:30 也认）"""
     _d = str(it.get("d", ""))
-    return _d if re.fullmatch(r"\d{4}-\d{2}-\d{2}", _d) else "0000-00-00"
+    return _d if re.match(r"\d{4}-\d{2}-\d{2}", _d) else "0000-00-00"
 
 
 def recent_log_items(row, n: int = 5) -> tuple:
@@ -505,28 +510,36 @@ def recent_log_items(row, n: int = 5) -> tuple:
     return sorted(items, key=_log_date_key, reverse=True)[:n], len(items)
 
 
-def render_recent_logs(row, n: int = 5, extra: str = "") -> None:
-    """画「最近往来明细」表格（客户往来明细页 和 记账页 共用这一套）"""
-    items, total = recent_log_items(row, n)
-    st.markdown(f"**📋 最近往来明细**（最新 {n} 笔　·　共 {total} 笔）{extra}")
-    if not items:
-        st.caption("还没有往来记录 ✓ 记这一笔之后就会出现在这里")
-        return
-    _rows = ["| 日期 | 类型 | 金额 | 内容 |", "|:--|:--|--:|:--|"]
-    for _it in items:
-        _d = str(_it.get("d", "")).strip() or "—"
-        _t = "💰 收款" if str(_it.get("t")) == "收" else "➕ 欠款"
-        _v = float(_it.get("v", 0) or 0)
-        _h = "＊" if _it.get("old") else ""
+def _log_table_md(items: list) -> str:
+    """把几笔往来画成一张小表（日期 | 类型 | 金额 | 内容）"""
+    rows = ["| 日期 | 类型 | 金额 | 内容 |", "|:--|:--|--:|:--|"]
+    for it in items:
+        _d = str(it.get("d", "")).strip() or "—"
+        _t = "💰 收款" if str(it.get("t")) == "收" else "➕ 欠款"
+        _v = float(it.get("v", 0) or 0)
+        _h = "＊" if it.get("old") else ""
         # 内容太长会把手机上的表格挤爆，超过 12 个字就截断
-        _m = str(_it.get("m", "") or "").strip().replace("|", "｜")
+        _m = str(it.get("m", "") or "").strip().replace("|", "｜")
         if len(_m) > 12:
             _m = _m[:12] + "…"
-        _rows.append(f"| {_d}{_h} | {_t} | ¥{_v:,.2f} | {_m} |")
-    st.markdown("\n".join(_rows))
+        rows.append(f"| {_d}{_h} | {_t} | ¥{_v:,.2f} | {_m} |")
+    return "\n".join(rows)
+
+
+def render_recent_logs(row, n: int = 5, extra: str = "", key_prefix: str = "x") -> None:
+    """画「最近往来明细」（客户往来明细页 和 记账页 共用这一套）
+       默认只显示最新 n 笔；下面的「点开看全部」能展开其余的"""
+    all_items, total = recent_log_items(row, 10 ** 9)
+    st.markdown(f"**📋 最近往来明细**（最新 {min(n, total)} 笔　·　共 {total} 笔）{extra}")
+    if not all_items:
+        st.caption("还没有往来记录 ✓ 记这一笔之后就会出现在这里")
+        return
+    st.markdown(_log_table_md(all_items[:n]))
     if total > n:
-        st.caption(f"只列最新 {n} 笔，更早的看上方的柱状图/合计 ✓")
-    if any(_it.get("old") for _it in items):
+        with st.expander(f"👉 点开看其余 {total - n} 笔（共 {total} 笔）",
+                         expanded=False):
+            st.markdown(_log_table_md(all_items[n:]))
+    if any(it.get("old") for it in all_items):
         st.caption("带 ＊ 的是老数据自动补的「历史记录」✓")
 
 
@@ -1067,7 +1080,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v121")
+st.caption("版本 v123")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1145,9 +1158,13 @@ st.markdown(
     /* 搜索框：宽度不再硬限制，改由卡片里那一行的列宽控制（见「🔍 客户搜索栏」） */
     .st-key-search_box input { padding-left: 0.55rem !important; }
 
-    /* 「🔍 客户搜索栏」往下贴着输入框：容器 gap=0 + 把标识和控件自带的边距抹掉 */
-    .st-key-search_row [data-testid="stCaptionContainer"] { margin-bottom: 0 !important; }
+    /* 「🔍 客户搜索栏」紧贴输入框：只轻轻往上收一点，别压到字（上次拉太过，字被切了） */
+    .st-key-search_row [data-testid="stCaptionContainer"] { margin-bottom: -0.15rem !important; }
+    .st-key-search_row [data-testid="stCaptionContainer"] p {
+        margin: 0 !important; padding: 0 !important; line-height: 1.25 !important;
+    }
     .st-key-search_row [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+    .st-key-search_row [data-testid="stVerticalBlock"] { gap: 0 !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1175,12 +1192,15 @@ if "money_kind" not in st.session_state:
 
 # =====================================================================
 # 记账页（点卡片上的「💰 收钱」「➕ 欠款」进来）
+# 页面名直接带类型（money_pay / money_debt），
+# 免得"收钱/欠款"共用一个标记时互相串味、点了一个就点不动另一个
 # =====================================================================
-if st.session_state["page"] == "money" and st.session_state["current_id"] in ledger.index:
+if (st.session_state["page"] in ("money_pay", "money_debt")
+        and st.session_state["current_id"] in ledger.index):
     _mid = st.session_state["current_id"]
     _mr = ledger.loc[_mid]
     _mn = str(_mr["客户名称"])
-    _is_pay = st.session_state["money_kind"] == "pay"
+    _is_pay = st.session_state["page"] == "money_pay"
     _m_owed = to_float(_mr["欠款金额"]) - to_float(_mr["已收金额"])
 
     _rb1, _rb2 = st.columns([3, 1])
@@ -1260,7 +1280,7 @@ if st.session_state["page"] == "money" and st.session_state["current_id"] in led
 
     # 这一家最近的收款/欠款明细（记完账也能马上核对）
     st.divider()
-    render_recent_logs(_mr, 5)
+    render_recent_logs(_mr, 5, key_prefix="money")
 
     # 手机上：自动把光标放对位置 ——
     #   欠款页：内容还没填 → 光标停在「内容」框（键盘上的回车/前进键就是"确定"）
@@ -1362,12 +1382,10 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
     # 直接在这家客户这里记账（点错了不用回列表找）
     _qb1, _qb2 = st.columns(2)
     if _qb1.button("💰 收钱", key=f"dt_pay_{cur}", type="primary"):
-        st.session_state["page"] = "money"
-        st.session_state["money_kind"] = "pay"
+        st.session_state["page"] = "money_pay"
         st.rerun()
     if _qb2.button("➕ 欠款", key=f"dt_debt_{cur}", type="primary"):
-        st.session_state["page"] = "money"
-        st.session_state["money_kind"] = "debt"
+        st.session_state["page"] = "money_debt"
         st.rerun()
     st.divider()
 
@@ -1702,7 +1720,7 @@ if st.session_state["page"] == "customer" and st.session_state["current_id"] in 
         st.caption(f"（另有 {_other_year} 笔往年的记录，没算进今年的图里）")
 
     # ---- 最近往来明细：收款 / 欠款，带日期，只显示最新 5 笔 ----
-    render_recent_logs(_cr, 5)
+    render_recent_logs(_cr, 5, key_prefix="customer")
 
     st.divider()
     if st.button("📷 拍照 / 修改资料", type="primary"):
@@ -1946,13 +1964,11 @@ if mode == "🗂️ 卡片式":
                     unsafe_allow_html=True)
                 b1, b2, b3 = st.columns(3)
                 if b1.button("💰 收钱", key=f"pay_{rid}_{cname}"):
-                    st.session_state["page"] = "money"
-                    st.session_state["money_kind"] = "pay"
+                    st.session_state["page"] = "money_pay"
                     st.session_state["current_id"] = rid
                     st.rerun()
                 if b2.button("➕ 欠款", key=f"debt_{rid}_{cname}"):
-                    st.session_state["page"] = "money"
-                    st.session_state["money_kind"] = "debt"
+                    st.session_state["page"] = "money_debt"
                     st.session_state["current_id"] = rid
                     st.rerun()
                 if b3.button("📷 拍照", key=f"photo_{rid}_{cname}"):
