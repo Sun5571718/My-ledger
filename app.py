@@ -1080,7 +1080,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v124")
+st.caption("版本 v126")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1191,6 +1191,25 @@ if "scroll_mark" not in st.session_state:
     st.session_state["scroll_mark"] = "list"
 if "money_kind" not in st.session_state:
     st.session_state["money_kind"] = "pay"
+if "last_cust_name" not in st.session_state:
+    st.session_state["last_cust_name"] = ""
+
+# ---- 加固：进「记账页 / 客户页」之前，先把客户 id 修好 ----
+# 为什么要这样：保存后数据会从云端重新拉一遍，万一行的位置变了，
+# 记着的 current_id 就可能对不上号 → 页面会悄悄退回首页（你遇到的"点收钱变首页"）
+# 这里做三件事：① 转成整数 ② 对不上就用客户名字找回来 ③ 还找不到就明确提示
+if st.session_state["page"] in ("money_pay", "money_debt", "detail", "customer"):
+    try:
+        _cid_try = int(st.session_state["current_id"])
+    except Exception:
+        _cid_try = -1
+    st.session_state["current_id"] = _cid_try
+    if _cid_try not in ledger.index:
+        _want = str(st.session_state.get("last_cust_name", "")).strip()
+        if _want:
+            _hit = ledger.index[ledger["客户名称"].astype(str) == _want]
+            if len(_hit):
+                st.session_state["current_id"] = _hit[0]
 
 # =====================================================================
 # 记账页（点卡片上的「💰 收钱」「➕ 欠款」进来）
@@ -1326,6 +1345,18 @@ if (st.session_state["page"] in ("money_pay", "money_debt")
     st.stop()
 
 # =====================================================================
+# 兜底：明明点了「收钱 / 欠款」，但客户对不上号（改名/删除/数据重载）
+# → 明确告诉你，别默默退回首页让你以为点错了
+# =====================================================================
+if (st.session_state["page"] in ("money_pay", "money_debt")
+        and st.session_state["current_id"] not in ledger.index):
+    st.warning("没找到这位客户（可能刚被改名或删除）→ 请回列表重新点一家 ✓")
+    if st.button("← 返回客户列表", key="money_lost_back", type="primary"):
+        st.session_state["page"] = "list"
+        st.rerun()
+    st.stop()
+
+# =====================================================================
 # 确认删除页（点卡片右上角 🗑️ 进来）
 # =====================================================================
 if st.session_state["page"] == "del" and st.session_state["current_id"] in ledger.index:
@@ -1385,9 +1416,11 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
     _qb1, _qb2 = st.columns(2)
     if _qb1.button("💰 收钱", key=f"dt_pay_{cur}", type="primary"):
         st.session_state["page"] = "money_pay"
+        st.session_state["last_cust_name"] = cname
         st.rerun()
     if _qb2.button("➕ 欠款", key=f"dt_debt_{cur}", type="primary"):
         st.session_state["page"] = "money_debt"
+        st.session_state["last_cust_name"] = cname
         st.rerun()
     st.divider()
 
@@ -1886,7 +1919,9 @@ if st.session_state["show_add"]:
                 "照片": "",
             }])
             st.session_state["show_add"] = False          # 保存后自动收起添加表单
-            st.session_state["pending_search"] = name.strip()   # 顺便筛出这位新客户
+            # 新建完把搜索框清空（不然框里还留着刚才搜的字，得手动删）
+            st.session_state["pending_search"] = ""
+            st.session_state["clear_search"] = True
             update_ledger(pd.concat([ledger, new_row], ignore_index=True),
                           f"✅ 已添加「{name.strip()}」")
             st.rerun()
@@ -1953,6 +1988,9 @@ if mode == "🗂️ 卡片式":
                 if _clicked:
                     st.session_state["page"] = "customer"
                     st.session_state["current_id"] = rid
+                    st.session_state["last_cust_name"] = cname
+                    # 搜过再点进来 → 顺手把搜索框清空，回列表时不用手动删
+                    st.session_state["clear_search"] = True
                     st.rerun()
                 if _n2.button("🗑️", key=f"delc_{rid}_{cname}", help="删除这个客户"):
                     st.session_state["page"] = "del"
@@ -1968,10 +2006,12 @@ if mode == "🗂️ 卡片式":
                 if b1.button("💰 收钱", key=f"pay_{rid}_{cname}"):
                     st.session_state["page"] = "money_pay"
                     st.session_state["current_id"] = rid
+                    st.session_state["last_cust_name"] = cname
                     st.rerun()
                 if b2.button("➕ 欠款", key=f"debt_{rid}_{cname}"):
                     st.session_state["page"] = "money_debt"
                     st.session_state["current_id"] = rid
+                    st.session_state["last_cust_name"] = cname
                     st.rerun()
                 if b3.button("📷 拍照", key=f"photo_{rid}_{cname}"):
                     st.session_state["page"] = "detail"
