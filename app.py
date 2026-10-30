@@ -1080,7 +1080,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v123")
+st.caption("版本 v124")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1158,10 +1158,12 @@ st.markdown(
     /* 搜索框：宽度不再硬限制，改由卡片里那一行的列宽控制（见「🔍 客户搜索栏」） */
     .st-key-search_box input { padding-left: 0.55rem !important; }
 
-    /* 「🔍 客户搜索栏」紧贴输入框：只轻轻往上收一点，别压到字（上次拉太过，字被切了） */
-    .st-key-search_row [data-testid="stCaptionContainer"] { margin-bottom: -0.15rem !important; }
+    /* 「🔍 客户搜索栏」：上面和「年回款」留出空隙，下面紧贴搜索框
+       （别再往上拽了 —— 拽过头会压到年回款那一行） */
+    .st-key-search_row { margin-top: 0.55rem !important; }
+    .st-key-search_row [data-testid="stCaptionContainer"] { margin-bottom: 0 !important; }
     .st-key-search_row [data-testid="stCaptionContainer"] p {
-        margin: 0 !important; padding: 0 !important; line-height: 1.25 !important;
+        margin: 0 !important; padding: 0 !important; line-height: 1.3 !important;
     }
     .st-key-search_row [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
     .st-key-search_row [data-testid="stVerticalBlock"] { gap: 0 !important; }
