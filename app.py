@@ -1174,7 +1174,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v133")
+st.caption("版本 v132")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1284,28 +1284,14 @@ if st.session_state.pop("_scroll_top", False):
         """<script>
         (function(){
           function up(){
-            try {
-              var d = window.parent.document;
-              // ⚠️ Streamlit 的滚动条不在 window 上，而在 section.main 这类容器里 ✗
-              // 所以要把所有可能的滚动容器都归零，光调 window.scrollTo 没用 ✓
-              var sels = ['section[data-testid="stMain"]', 'section.main',
-                          '[data-testid="stMain"]', '.stApp',
-                          '[data-testid="stAppViewContainer"]', '.main'];
-              for (var i = 0; i < sels.length; i++) {
-                var els = d.querySelectorAll(sels[i]);
-                for (var j = 0; j < els.length; j++) {
-                  try { els[j].scrollTop = 0; } catch (e) {}
-                }
-              }
-              try { d.documentElement.scrollTop = 0; } catch (e) {}
-              try { d.body.scrollTop = 0; } catch (e) {}
-              try { window.parent.scrollTo(0, 0); } catch (e) {}
-            } catch (e) {}
+            try { window.parent.scrollTo({top: 0, left: 0, behavior: 'instant'}); }
+            catch (e) {}
+            try { window.parent.document.documentElement.scrollTop = 0; } catch (e) {}
+            try { window.parent.document.body.scrollTop = 0; } catch (e) {}
           }
           up();
           setTimeout(up, 150);
           setTimeout(up, 450);
-          setTimeout(up, 900);
         })();
         </script>""",
         height=0,
