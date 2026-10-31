@@ -1174,7 +1174,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v134")
+st.caption("版本 v135")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1276,8 +1276,13 @@ if st.session_state["flash"]:
 _prev_page = st.session_state.get("_last_page", "")
 _cur_page_now = st.session_state.get("page", "list")
 if _prev_page != _cur_page_now:
-    st.session_state["_scroll_top"] = True
     st.session_state["_last_page"] = _cur_page_now
+    # ⚠️ 记账页（收钱/欠款）绝对不要强制回顶 ✗
+    # 那两页会自动聚焦输入框、把键盘弹起来 ✗
+    # 一强制回顶，输入框就被键盘挡住、你没处填 ✗
+    # 记账页交给浏览器自己把输入框滚到可见位置 ✓
+    if _cur_page_now not in ("money_pay", "money_debt"):
+        st.session_state["_scroll_top"] = True
 
 if st.session_state.pop("_scroll_top", False):
     components.html(
