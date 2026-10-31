@@ -1174,7 +1174,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v128")
+st.caption("版本 v129")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1363,6 +1363,7 @@ if (st.session_state["page"] in ("money_pay", "money_debt")
     _mv = safe_calc(_mv_txt)
 
     if _mok:
+        _go_list = False
         try:
             if _mv <= 0:
                 st.warning("金额没看懂 ✗ 请输入数字，或者像 500+300 这样的算式 ✓")
@@ -1392,11 +1393,14 @@ if (st.session_state["page"] in ("money_pay", "money_debt")
                         st.session_state.get("cloud_error")
                         or "请检查网络后再点一次确定"))
                 else:
-                    # 记完账（收款/欠款都一样）→ 回首页，方便接着记下一家
-                    st.session_state["page"] = "list"
-                    st.rerun()
+                    _go_list = True        # 记完账 → 回首页（标记好，跳出 try 再跳）
         except Exception as _exc:
+            # ⚠️ 注意：st.rerun() 不能写在 try 里面！
+            # 它靠抛异常来"重新运行"，被这里接住的话就不会跳转 → 页面停在原地 ✗
             st.error(f"保存出错：{_exc}\n\n数据没变，可以再试一次 ✓")
+        if _go_list:
+            st.session_state["page"] = "list"
+            st.rerun()
     if _mno:
         st.session_state["page"] = "detail"
         st.rerun()
