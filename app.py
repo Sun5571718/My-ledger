@@ -1174,7 +1174,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v132")
+st.caption("版本 v134")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1270,9 +1270,9 @@ if st.session_state["flash"]:
     st.success(st.session_state["flash"])
     st.session_state["flash"] = ""
 
-# 换页面之后让浏览器滚回最上面。
-# 不修的话：新页面会停在上一个页面滚到的位置 ✗
-# 手机上就表现为"一打开就看到下半截、上半截（标题/返回）看不到" ✗
+# ===== 换页面后把滚动条归零（其他一切保持 v132 原样）=====
+# 不归零的话：新页面会停在上一个页面滚到的位置 ✗
+# 手机上就表现为"一进去就看到照片/编辑客户那一截，标题和返回键全看不到" ✗
 _prev_page = st.session_state.get("_last_page", "")
 _cur_page_now = st.session_state.get("page", "list")
 if _prev_page != _cur_page_now:
@@ -1284,14 +1284,31 @@ if st.session_state.pop("_scroll_top", False):
         """<script>
         (function(){
           function up(){
-            try { window.parent.scrollTo({top: 0, left: 0, behavior: 'instant'}); }
-            catch (e) {}
-            try { window.parent.document.documentElement.scrollTop = 0; } catch (e) {}
-            try { window.parent.document.body.scrollTop = 0; } catch (e) {}
+            try {
+              var w = window.parent;
+              var d = w.document;
+              // Streamlit 的滚动条在 section.main 这类容器里，不在 window 上 ✗
+              var sels = ['section[data-testid="stMain"]', 'section.main', '.main',
+                          '[data-testid="stMain"]', '[data-testid="stAppViewContainer"]',
+                          '.stApp', '#root', 'body', 'html'];
+              for (var i = 0; i < sels.length; i++) {
+                var es = d.querySelectorAll(sels[i]);
+                for (var j = 0; j < es.length; j++) {
+                  try { es[j].scrollTop = 0; es[j].scrollTo(0, 0); } catch (e) {}
+                }
+              }
+              try { d.documentElement.scrollTop = 0; } catch (e) {}
+              try { d.body.scrollTop = 0; } catch (e) {}
+              try { w.scrollTo(0, 0); } catch (e) {}
+              try {
+                var a = d.getElementById('top');
+                if (a && a.scrollIntoView) { a.scrollIntoView(true); }
+              } catch (e) {}
+            } catch (e) {}
           }
-          up();
-          setTimeout(up, 150);
-          setTimeout(up, 450);
+          // 手机渲染慢，多补几次：一渲染完就回顶，后面再压几次
+          var ts = [0, 120, 300, 700, 1200, 2000];
+          for (var k = 0; k < ts.length; k++) { setTimeout(up, ts[k]); }
         })();
         </script>""",
         height=0,
