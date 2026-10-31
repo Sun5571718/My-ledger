@@ -477,6 +477,25 @@ def add_log(row, kind: str, amount: float, when=None, memo: str = "") -> str:
     return dump_log(items)
 
 
+def fmt_time(value) -> str:
+    """把流水里的时间统一显示成「2026-10-30 14:36」：有秒也只显示到分 ✓"""
+    s = str(value if value is not None else "").strip()
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?", s)
+    if not m:
+        return s
+    return f"{m.group(1)} {m.group(2)}" if m.group(2) else m.group(1)
+
+
+def remove_log(row, k: int):
+    """删掉这家客户的第 k 笔流水（按原始顺序），返回 (新的流水列表, 类型, 金额)"""
+    items = load_log(row)
+    if not (0 <= k < len(items)):
+        return None
+    it = items.pop(k)
+    kind = "收" if str(it.get("t")) == "收" else "欠"
+    return items, kind, float(it.get("v", 0) or 0)
+
+
 def logs_with_seed(row) -> list:
     """取这位客户的往来流水。老数据没有逐笔流水的，就用欠款金额/已收金额补一条
     「历史记录」（带 old=1 标记），这样页面上不会一片空白。"""
@@ -514,7 +533,7 @@ def _log_table_md(items: list) -> str:
     """把几笔往来画成一张小表（日期 | 类型 | 金额 | 内容）"""
     rows = ["| 日期 | 类型 | 金额 | 内容 |", "|:--|:--|--:|:--|"]
     for it in items:
-        _d = str(it.get("d", "")).strip() or "—"
+        _d = fmt_time(it.get("d", "")) or "—"
         _t = "💰 收款" if str(it.get("t")) == "收" else "➕ 欠款"
         _v = float(it.get("v", 0) or 0)
         _h = "＊" if it.get("old") else ""
@@ -528,7 +547,7 @@ def _log_table_md(items: list) -> str:
 
 def render_recent_logs(row, n: int = 5, extra: str = "", key_prefix: str = "x") -> None:
     """画「最近往来明细」（客户往来明细页 和 记账页 共用这一套）
-       默认只显示最新 n 笔；下面的「点开看全部」能展开其余的"""
+       默认只显示最新 n 笔 + 可展开全部 + 可删掉某一笔"""
     all_items, total = recent_log_items(row, 10 ** 9)
     st.markdown(f"**📋 最近往来明细**（最新 {min(n, total)} 笔　·　共 {total} 笔）{extra}")
     if not all_items:
@@ -542,6 +561,52 @@ def render_recent_logs(row, n: int = 5, extra: str = "", key_prefix: str = "x") 
     if any(it.get("old") for it in all_items):
         st.caption("带 ＊ 的是老数据自动补的「历史记录」✓")
 
+    # ---- 删除某一笔（点两次，防误删）----
+    _pairs = list(enumerate(logs_with_seed(row)))
+    _pairs.sort(key=lambda _p: _log_date_key(_p[1]), reverse=True)
+    _labels, _map = [], {}
+    for _i, _it in _pairs:
+        _lab = (f"{fmt_time(_it.get('d', ''))}　"
+                f"{'收款' if str(_it.get('t')) == '收' else '欠款'}　"
+                f"¥{float(_it.get('v', 0) or 0):,.2f}"
+                + (f"　{str(_it.get('m', ''))[:8]}" if _it.get("m") else ""))
+        while _lab in _map:
+            _lab += "·"
+        _labels.append(_lab)
+        _map[_lab] = _i
+    if not _labels:
+        return
+    with st.expander("🗑️ 删除某一笔（点开）", expanded=False):
+        _pick = st.selectbox("要删哪一笔？", ["（不删）"] + _labels,
+                             key=f"logdel_pick_{key_prefix}")
+        if _pick != "（不删）":
+            st.caption("删掉后，这笔金额会从「欠款 / 已收」里扣回去 ✓")
+            if st.button("确认删除这一笔", key=f"logdel_go_{key_prefix}",
+                         type="primary"):
+                _res = remove_log(row, _map[_pick])
+                if _res:
+                    _items, _kind, _amt = _res
+                    _cid = st.session_state["current_id"]
+                    if _cid in ledger.index:
+                        _new = ledger.copy()
+                        if _kind == "收":
+                            _new.loc[_cid, "已收金额"] = max(
+                                0.0, to_float(_new.loc[_cid, "已收金额"]) - _amt)
+                            _paid_dates = [str(x.get("d", "")) for x in _items
+                                           if str(x.get("t")) == "收"]
+                            _new.loc[_cid, "最后收款时间"] = (
+                                pd.to_datetime(max(_paid_dates), errors="coerce")
+                                if _paid_dates else pd.NaT)
+                        else:
+                            _new.loc[_cid, "欠款金额"] = max(
+                                0.0, to_float(_new.loc[_cid, "欠款金额"]) - _amt)
+                        _new.loc[_cid, LOG_COL] = dump_log(_items)
+                        update_ledger(
+                            _new,
+                            f"🗑️ 已删除一笔（{'收款' if _kind == '收' else '欠款'} "
+                            f"¥{_amt:,.2f}）", force_reload=True)
+                        st.rerun()
+
 
 def last_log_line(row) -> str:
     """一句话说清"上次往来"是什么时候、多少钱（记账页顶部用）"""
@@ -550,7 +615,7 @@ def last_log_line(row) -> str:
         return "上次往来：还没有记录"
     it = items[0]
     kind = "收款" if str(it.get("t")) == "收" else "欠款"
-    return (f"上次往来：{str(it.get('d', '')).strip() or '日期不详'}　"
+    return (f"上次往来：{fmt_time(it.get('d', '')) or '日期不详'}　"
             f"{kind} ¥{float(it.get('v', 0) or 0):,.2f}")
 
 
@@ -839,15 +904,21 @@ def set_flash(msg: str) -> None:
     st.session_state["flash"] = msg
 
 
-def update_ledger(df: pd.DataFrame, msg: str = "", force_reload: bool = False) -> None:
+def update_ledger(df: pd.DataFrame, msg: str = "", force_reload: bool = False) -> bool:
     """
     ⚡ 提速关键：只有「新增的行」才需要从云端重新拉一遍（为了拿云端发的 id）；
     普通编辑（改金额、备注…）直接本地更新，省掉一次跨洋往返，点起来跟手很多。
     收钱/欠款这类要立刻看到新数字的，传 force_reload=True，保证和云端一致。
+    返回 True=存上了 / False=没存上（调用方可以据此决定要不要跳页面）
     """
     df = normalize(df)
     need_reload = force_reload or (USE_CLOUD and bool((df[ID_COL] == 0).any()))
-    if save_data(df):
+    try:
+        ok = save_data(df)
+    except Exception as exc:                    # 兜底：任何异常都算"没存上"
+        st.session_state["cloud_error"] = str(exc)
+        ok = False
+    if ok:
         st.session_state["ledger"] = load_data() if need_reload else df
     else:
         st.session_state["ledger"] = df
@@ -855,6 +926,7 @@ def update_ledger(df: pd.DataFrame, msg: str = "", force_reload: bool = False) -
     st.session_state["editor_key"] += 1
     if msg:
         set_flash(msg)
+    return ok
 
 
 COLUMN_CONFIG = {
@@ -1080,7 +1152,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v126")
+st.caption("版本 v127")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1179,6 +1251,8 @@ if st.session_state["flash"]:
 ledger = st.session_state["ledger"]
 data = with_unpaid(ledger)
 
+_brand_new = "page" not in st.session_state      # 这次是不是全新会话（刷新/重连）
+
 if "page" not in st.session_state:
     st.session_state["page"] = "list"
 if "current_id" not in st.session_state:
@@ -1193,6 +1267,31 @@ if "money_kind" not in st.session_state:
     st.session_state["money_kind"] = "pay"
 if "last_cust_name" not in st.session_state:
     st.session_state["last_cust_name"] = ""
+
+# =====================================================================
+# 把"在哪一页"记进网址（?p=money_pay&c=57）
+# 手机刷新页面 / 断线重连 → 会话变量会清空（这就是"点收钱变首页"的根源 ✗）
+# 记进网址之后，重连回来还停在原来那一页 ✓
+# =====================================================================
+try:
+    _QP = st.query_params
+    _known = ("list", "money_pay", "money_debt", "detail", "customer", "del",
+              "stats", "fmt")
+    if _brand_new:
+        _qp_page = str(_QP.get("p", "") or "")
+        _qp_cid = str(_QP.get("c", "") or "")
+        if _qp_page in _known and _qp_page != "list":
+            st.session_state["page"] = _qp_page
+        if _qp_cid.lstrip("-").isdigit():
+            st.session_state["current_id"] = int(_qp_cid)
+    _cur_page = str(st.session_state["page"])
+    _cur_cid = str(st.session_state["current_id"])
+    if str(_QP.get("p", "")) != _cur_page:
+        _QP["p"] = _cur_page
+    if str(_QP.get("c", "")) != _cur_cid:
+        _QP["c"] = _cur_cid
+except Exception:
+    pass                                  # 网址参数只是保险，坏了也不影响用
 
 # ---- 加固：进「记账页 / 客户页」之前，先把客户 id 修好 ----
 # 为什么要这样：保存后数据会从云端重新拉一遍，万一行的位置变了，
@@ -1269,32 +1368,40 @@ if (st.session_state["page"] in ("money_pay", "money_debt")
     _mv = safe_calc(_mv_txt)
 
     if _mok:
-        if _mv <= 0:
-            st.warning("金额没看懂 ✗ 请输入数字，或者像 500+300 这样的算式 ✓")
-        else:
-            _new = ledger.copy()
-            # 输了算式的话，把原式也一起显示出来（例如"¥800.00（500+300）"）
-            _raw = str(_mv_txt).strip()
-            _show = f"（{_raw}）" if has_operator(_raw) else ""
-            if _is_pay:
-                _new.loc[_mid, "已收金额"] = to_float(_mr["已收金额"]) + _mv
-                _new.loc[_mid, "最后收款时间"] = pd.Timestamp(date.today())
-                _new.loc[_mid, LOG_COL] = add_log(_mr, "收", _mv)
-                _msg = f"✅ 「{_mn}」已收 ¥{_mv:,.2f}{_show}"
+        try:
+            if _mv <= 0:
+                st.warning("金额没看懂 ✗ 请输入数字，或者像 500+300 这样的算式 ✓")
             else:
-                _new.loc[_mid, "欠款金额"] = to_float(_mr["欠款金额"]) + _mv
-                # 记了新的欠款 → 这位客户的「欠款日期」改成操作当天，
-                # 卡片上的「未回款天数」就从今天重新开始数（你定的规矩）
-                _new.loc[_mid, "欠款日期"] = pd.Timestamp(date.today())
-                _new.loc[_mid, LOG_COL] = add_log(_mr, "欠", _mv, memo=_memo)
-                _memo_show = f"　「{_memo.strip()}」" if _memo.strip() else ""
-                _msg = (f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}{_show}{_memo_show}"
-                        f"（天数从今天重新数）")
-            st.session_state["_clear_money_amt"] = True   # 下次进来把金额框清空
-            update_ledger(_new, _msg, force_reload=True)
-            # 记完账（不管是收款还是欠款）→ 都直接回首页，方便接着记下一家
-            st.session_state["page"] = "list"
-            st.rerun()
+                _new = ledger.copy()
+                # 输了算式的话，把原式也一起显示出来（例如"¥800.00（500+300）"）
+                _raw = str(_mv_txt).strip()
+                _show = f"（{_raw}）" if has_operator(_raw) else ""
+                if _is_pay:
+                    _new.loc[_mid, "已收金额"] = to_float(_mr["已收金额"]) + _mv
+                    _new.loc[_mid, "最后收款时间"] = pd.Timestamp(date.today())
+                    _new.loc[_mid, LOG_COL] = add_log(_mr, "收", _mv)
+                    _msg = f"✅ 「{_mn}」已收 ¥{_mv:,.2f}{_show}"
+                else:
+                    _new.loc[_mid, "欠款金额"] = to_float(_mr["欠款金额"]) + _mv
+                    # 记了新的欠款 → 「欠款日期」改成当天，天数从今天重新数
+                    _new.loc[_mid, "欠款日期"] = pd.Timestamp(date.today())
+                    _new.loc[_mid, LOG_COL] = add_log(_mr, "欠", _mv, memo=_memo)
+                    _memo_show = f"　「{_memo.strip()}」" if _memo.strip() else ""
+                    _msg = (f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}{_show}{_memo_show}"
+                            f"（天数从今天重新数）")
+                st.session_state["_clear_money_amt"] = True
+                _saved = update_ledger(_new, _msg, force_reload=True)
+                if _saved is False:
+                    # 云端没存上 → 留在原地别跳走（不然你以为记成功了）
+                    st.error("云端没存上 ✗ " + (
+                        st.session_state.get("cloud_error")
+                        or "请检查网络后再点一次确定"))
+                else:
+                    # 记完账（收款/欠款都一样）→ 回首页，方便接着记下一家
+                    st.session_state["page"] = "list"
+                    st.rerun()
+        except Exception as _exc:
+            st.error(f"保存出错：{_exc}\n\n数据没变，可以再试一次 ✓")
     if _mno:
         st.session_state["page"] = "detail"
         st.rerun()
