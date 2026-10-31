@@ -505,7 +505,9 @@ def remove_log(row, k: int):
 
 def _go_page(page_name: str, cid=None, cname=None) -> None:
     """按钮点击时用「回调」直接改页面状态 —— 比"点了再 rerun"可靠得多。
-       手机上点「收钱/欠款」有时会因为 rerun 时序丢掉跳转，用回调就没这问题 ✓"""
+       手机上点「收钱/欠款」有时会因为 rerun 时序丢掉跳转，用回调就没这问题 ✓
+       ⚠️ 这里故意不清空搜索框：搜了一家再点进去，返回时搜索条件还在，
+          不用重新搜一遍 ✓（只在"新建客户"之后才清空）"""
     st.session_state["page"] = page_name
     if cid is not None:
         try:
@@ -514,8 +516,6 @@ def _go_page(page_name: str, cid=None, cname=None) -> None:
             st.session_state["current_id"] = -1
     if cname:
         st.session_state["last_cust_name"] = str(cname)
-    if page_name in ("customer", "money_pay", "money_debt"):
-        st.session_state["clear_search"] = True
 
 
 def logs_with_seed(row) -> list:
@@ -1174,7 +1174,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v129")
+st.caption("版本 v130")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1393,13 +1393,15 @@ if (st.session_state["page"] in ("money_pay", "money_debt")
                         st.session_state.get("cloud_error")
                         or "请检查网络后再点一次确定"))
                 else:
-                    _go_list = True        # 记完账 → 回首页（标记好，跳出 try 再跳）
+                    _go_list = True        # 记完账 → 回这家客户页（不是首页）
         except Exception as _exc:
             # ⚠️ 注意：st.rerun() 不能写在 try 里面！
             # 它靠抛异常来"重新运行"，被这里接住的话就不会跳转 → 页面停在原地 ✗
             st.error(f"保存出错：{_exc}\n\n数据没变，可以再试一次 ✓")
         if _go_list:
-            st.session_state["page"] = "list"
+            # 记完账 → 回到这位客户的详情页（能看到新数字、也能接着记下一笔）
+            # 不跳首页：不然你还得重新搜一遍这位客户 ✗
+            st.session_state["page"] = "detail"
             st.rerun()
     if _mno:
         st.session_state["page"] = "detail"
