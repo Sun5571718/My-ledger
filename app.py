@@ -22,7 +22,7 @@ from __future__ import annotations
 import io
 import re
 import secrets
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -429,7 +429,7 @@ def has_operator(text) -> bool:
 def unpaid_days(when) -> float:
     if pd.isna(when):
         return float("nan")
-    return float(max((pd.Timestamp(date.today()) - pd.Timestamp(when)).days, 0))
+    return float(max((pd.Timestamp(now_bj().date()) - pd.Timestamp(when)).days, 0))
 
 
 def days_text(row) -> str:
@@ -461,12 +461,19 @@ def dump_log(items: list) -> str:
     return json.dumps(items, ensure_ascii=False) if items else ""
 
 
+def now_bj() -> datetime:
+    """北京时间。
+       云端服务器的系统时间是 UTC（会差 8 小时 ✗），
+       所以用「UTC + 8 小时」算，不管服务器在哪个时区都不会错 ✓"""
+    return datetime.now(timezone.utc) + timedelta(hours=8)
+
+
 def add_log(row, kind: str, amount: float, when=None, memo: str = "") -> str:
     """往流水里加一条：kind 是「欠」或「收」，memo 是这笔的内容/说明（可以空）
-       时间默认精确到分钟（手机上看得出是几点几分记的）"""
+       时间默认用北京时间、精确到分钟"""
     items = load_log(row)
     if when is None:
-        _when = datetime.now().strftime("%Y-%m-%d %H:%M")
+        _when = now_bj().strftime("%Y-%m-%d %H:%M")
     else:
         _when = str(when)
     _one = {"d": _when, "t": kind, "v": round(float(amount), 2)}
@@ -494,6 +501,21 @@ def remove_log(row, k: int):
     it = items.pop(k)
     kind = "收" if str(it.get("t")) == "收" else "欠"
     return items, kind, float(it.get("v", 0) or 0)
+
+
+def _go_page(page_name: str, cid=None, cname=None) -> None:
+    """按钮点击时用「回调」直接改页面状态 —— 比"点了再 rerun"可靠得多。
+       手机上点「收钱/欠款」有时会因为 rerun 时序丢掉跳转，用回调就没这问题 ✓"""
+    st.session_state["page"] = page_name
+    if cid is not None:
+        try:
+            st.session_state["current_id"] = int(cid)
+        except Exception:
+            st.session_state["current_id"] = -1
+    if cname:
+        st.session_state["last_cust_name"] = str(cname)
+    if page_name in ("customer", "money_pay", "money_debt"):
+        st.session_state["clear_search"] = True
 
 
 def logs_with_seed(row) -> list:
@@ -1152,7 +1174,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v127")
+st.caption("版本 v128")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1251,8 +1273,6 @@ if st.session_state["flash"]:
 ledger = st.session_state["ledger"]
 data = with_unpaid(ledger)
 
-_brand_new = "page" not in st.session_state      # 这次是不是全新会话（刷新/重连）
-
 if "page" not in st.session_state:
     st.session_state["page"] = "list"
 if "current_id" not in st.session_state:
@@ -1267,31 +1287,6 @@ if "money_kind" not in st.session_state:
     st.session_state["money_kind"] = "pay"
 if "last_cust_name" not in st.session_state:
     st.session_state["last_cust_name"] = ""
-
-# =====================================================================
-# 把"在哪一页"记进网址（?p=money_pay&c=57）
-# 手机刷新页面 / 断线重连 → 会话变量会清空（这就是"点收钱变首页"的根源 ✗）
-# 记进网址之后，重连回来还停在原来那一页 ✓
-# =====================================================================
-try:
-    _QP = st.query_params
-    _known = ("list", "money_pay", "money_debt", "detail", "customer", "del",
-              "stats", "fmt")
-    if _brand_new:
-        _qp_page = str(_QP.get("p", "") or "")
-        _qp_cid = str(_QP.get("c", "") or "")
-        if _qp_page in _known and _qp_page != "list":
-            st.session_state["page"] = _qp_page
-        if _qp_cid.lstrip("-").isdigit():
-            st.session_state["current_id"] = int(_qp_cid)
-    _cur_page = str(st.session_state["page"])
-    _cur_cid = str(st.session_state["current_id"])
-    if str(_QP.get("p", "")) != _cur_page:
-        _QP["p"] = _cur_page
-    if str(_QP.get("c", "")) != _cur_cid:
-        _QP["c"] = _cur_cid
-except Exception:
-    pass                                  # 网址参数只是保险，坏了也不影响用
 
 # ---- 加固：进「记账页 / 客户页」之前，先把客户 id 修好 ----
 # 为什么要这样：保存后数据会从云端重新拉一遍，万一行的位置变了，
@@ -1378,13 +1373,13 @@ if (st.session_state["page"] in ("money_pay", "money_debt")
                 _show = f"（{_raw}）" if has_operator(_raw) else ""
                 if _is_pay:
                     _new.loc[_mid, "已收金额"] = to_float(_mr["已收金额"]) + _mv
-                    _new.loc[_mid, "最后收款时间"] = pd.Timestamp(date.today())
+                    _new.loc[_mid, "最后收款时间"] = pd.Timestamp(now_bj().date())
                     _new.loc[_mid, LOG_COL] = add_log(_mr, "收", _mv)
                     _msg = f"✅ 「{_mn}」已收 ¥{_mv:,.2f}{_show}"
                 else:
                     _new.loc[_mid, "欠款金额"] = to_float(_mr["欠款金额"]) + _mv
                     # 记了新的欠款 → 「欠款日期」改成当天，天数从今天重新数
-                    _new.loc[_mid, "欠款日期"] = pd.Timestamp(date.today())
+                    _new.loc[_mid, "欠款日期"] = pd.Timestamp(now_bj().date())
                     _new.loc[_mid, LOG_COL] = add_log(_mr, "欠", _mv, memo=_memo)
                     _memo_show = f"　「{_memo.strip()}」" if _memo.strip() else ""
                     _msg = (f"✅ 「{_mn}」又欠 ¥{_mv:,.2f}{_show}{_memo_show}"
@@ -1521,14 +1516,10 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
 
     # 直接在这家客户这里记账（点错了不用回列表找）
     _qb1, _qb2 = st.columns(2)
-    if _qb1.button("💰 收钱", key=f"dt_pay_{cur}", type="primary"):
-        st.session_state["page"] = "money_pay"
-        st.session_state["last_cust_name"] = cname
-        st.rerun()
-    if _qb2.button("➕ 欠款", key=f"dt_debt_{cur}", type="primary"):
-        st.session_state["page"] = "money_debt"
-        st.session_state["last_cust_name"] = cname
-        st.rerun()
+    _qb1.button("💰 收钱", key=f"dt_pay_{cur}", type="primary",
+                on_click=_go_page, args=("money_pay", cur, cname))
+    _qb2.button("➕ 欠款", key=f"dt_debt_{cur}", type="primary",
+                on_click=_go_page, args=("money_debt", cur, cname))
     st.divider()
 
     # ---------- 照片 ----------
@@ -1624,7 +1615,7 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
             new.loc[cur, "欠款金额"] = debt
         if paid is not None:
             new.loc[cur, "已收金额"] = paid
-            new.loc[cur, "最后收款时间"] = pd.Timestamp(date.today())   # 自动记今天
+            new.loc[cur, "最后收款时间"] = pd.Timestamp(now_bj().date())   # 自动记今天
         if start is not None and pd.Timestamp(start) != pd.Timestamp(row["欠款日期"]):
             new.loc[cur, "欠款日期"] = pd.Timestamp(start)        # 改欠款日期
         if note.strip():
@@ -2091,18 +2082,10 @@ if mode == "🗂️ 卡片式":
                     unsafe_allow_html=True)
                 _n1, _n2 = st.columns([5, 1], vertical_alignment="center")
                 _title = f"{badge} {cname}　⏰ {days}"
-                _clicked = _n1.button(_title, key=f"open_cust_{rid}_{cname}")
-                if _clicked:
-                    st.session_state["page"] = "customer"
-                    st.session_state["current_id"] = rid
-                    st.session_state["last_cust_name"] = cname
-                    # 搜过再点进来 → 顺手把搜索框清空，回列表时不用手动删
-                    st.session_state["clear_search"] = True
-                    st.rerun()
-                if _n2.button("🗑️", key=f"delc_{rid}_{cname}", help="删除这个客户"):
-                    st.session_state["page"] = "del"
-                    st.session_state["current_id"] = rid
-                    st.rerun()
+                _n1.button(_title, key=f"open_cust_{rid}_{cname}",
+                           on_click=_go_page, args=("customer", rid, cname))
+                _n2.button("🗑️", key=f"delc_{rid}_{cname}", help="删除这个客户",
+                           on_click=_go_page, args=("del", rid, cname))
                 st.markdown(
                     f"<div>未付 <b style='color:{_col};font-size:1.1rem'>"
                     f"¥{unpaid:,.2f}</b>"
@@ -2110,24 +2093,12 @@ if mode == "🗂️ 卡片式":
                     + "</div>",
                     unsafe_allow_html=True)
                 b1, b2, b3 = st.columns(3)
-                if b1.button("💰 收钱", key=f"pay_{rid}_{cname}"):
-                    st.session_state["page"] = "money_pay"
-                    st.session_state["current_id"] = rid
-                    st.session_state["last_cust_name"] = cname
-                    st.rerun()
-                if b2.button("➕ 欠款", key=f"debt_{rid}_{cname}"):
-                    st.session_state["page"] = "money_debt"
-                    st.session_state["current_id"] = rid
-                    st.session_state["last_cust_name"] = cname
-                    st.rerun()
-                if b3.button("📷 拍照", key=f"photo_{rid}_{cname}"):
-                    st.session_state["page"] = "detail"
-                    st.session_state["current_id"] = rid
-                    st.session_state["editing_id"] = -1
-                    st.session_state["del_pending"] = -1
-                    st.session_state["pay_id"] = -1
-                    st.session_state["debt_id"] = -1
-                    st.rerun()
+                b1.button("💰 收钱", key=f"pay_{rid}_{cname}",
+                          on_click=_go_page, args=("money_pay", rid, cname))
+                b2.button("➕ 欠款", key=f"debt_{rid}_{cname}",
+                          on_click=_go_page, args=("money_debt", rid, cname))
+                b3.button("📷 拍照", key=f"photo_{rid}_{cname}",
+                          on_click=_go_page, args=("detail", rid, cname))
 
 else:
     base = page_rows.reset_index(drop=True)
