@@ -1174,7 +1174,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- 主区域
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
 st.markdown("#### 💰 客户待回款台账")
-st.caption("版本 v130")
+st.caption("版本 v132")
 
 # ==== 界面微调：藏掉 Streamlit 痕迹 / 压缩留白 / 并排控件不换行 ====
 st.markdown(
@@ -1269,6 +1269,33 @@ st.markdown(
 if st.session_state["flash"]:
     st.success(st.session_state["flash"])
     st.session_state["flash"] = ""
+
+# 换页面之后让浏览器滚回最上面。
+# 不修的话：新页面会停在上一个页面滚到的位置 ✗
+# 手机上就表现为"一打开就看到下半截、上半截（标题/返回）看不到" ✗
+_prev_page = st.session_state.get("_last_page", "")
+_cur_page_now = st.session_state.get("page", "list")
+if _prev_page != _cur_page_now:
+    st.session_state["_scroll_top"] = True
+    st.session_state["_last_page"] = _cur_page_now
+
+if st.session_state.pop("_scroll_top", False):
+    components.html(
+        """<script>
+        (function(){
+          function up(){
+            try { window.parent.scrollTo({top: 0, left: 0, behavior: 'instant'}); }
+            catch (e) {}
+            try { window.parent.document.documentElement.scrollTop = 0; } catch (e) {}
+            try { window.parent.document.body.scrollTop = 0; } catch (e) {}
+          }
+          up();
+          setTimeout(up, 150);
+          setTimeout(up, 450);
+        })();
+        </script>""",
+        height=0,
+    )
 
 ledger = st.session_state["ledger"]
 data = with_unpaid(ledger)
@@ -1449,6 +1476,7 @@ if (st.session_state["page"] in ("money_pay", "money_debt")
         </script>""",
         height=0,
     )
+
 
     st.stop()
 
@@ -1650,6 +1678,7 @@ if st.session_state["page"] == "detail" and cur in ledger.index:
         if st.button("🗑️ 删除这个客户"):
             st.session_state["del_pending"] = cur
             st.rerun()
+
 
     st.stop()          # 详情页到此为止，不再显示下面的主页内容
 
